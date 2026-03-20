@@ -1,0 +1,7 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+
+# LLM providers — 按需安装，至少装一个
+anthropic>=0.28.0   # LLM_PROVIDER=anthropic
+openai>=1.30.0      # LLM_PROVIDER=openai | openai-compatible
