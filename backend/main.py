@@ -180,6 +180,18 @@ app.add_middleware(
 )
 
 
+# ── 上下文管理 ────────────────────────────────────────────────────────────────
+
+# 每次发给 LLM 的最大历史条数（不含本轮用户消息）
+# 12 条 = 6 轮对话，覆盖当前话题上下文，同时控制 token 消耗
+MAX_HISTORY_MESSAGES = 12
+
+
+def trim_history(history: list) -> list:
+    """保留最近 MAX_HISTORY_MESSAGES 条，丢弃更早的消息。"""
+    return history[-MAX_HISTORY_MESSAGES:]
+
+
 # ── 请求 / 响应模型 ───────────────────────────────────────────────────────────
 
 class HistoryItem(BaseModel):
@@ -217,7 +229,7 @@ async def chat(req: ChatRequest):
             )
         )
 
-    messages = [{"role": m.role, "content": m.content} for m in req.history]
+    messages = [{"role": m.role, "content": m.content} for m in trim_history(req.history)]
     messages.append({"role": "user", "content": req.message})
 
     try:
@@ -230,7 +242,7 @@ async def chat(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
-    messages = [{"role": m.role, "content": m.content} for m in req.history]
+    messages = [{"role": m.role, "content": m.content} for m in trim_history(req.history)]
     messages.append({"role": "user", "content": req.message})
 
     if _provider is None:
