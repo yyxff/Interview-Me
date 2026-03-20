@@ -264,6 +264,55 @@ async def upload_resume(
     return {"ok": True, "chunks": chunk_count}
 
 
+@app.post("/upload/knowledge")
+async def upload_knowledge(file: UploadFile = File(...)):
+    """接受 EPUB 文件，转为 Markdown 保存到 knowledge/ 并立即索引。"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    fname = file.filename.lower()
+    if not fname.endswith(".epub"):
+        raise HTTPException(status_code=400, detail="目前只支持 EPUB 格式")
+    if not rag.is_available():
+        raise HTTPException(status_code=503, detail="RAG 模块未安装")
+
+    # 以去掉扩展名的文件名作为 source 标识
+    name = Path(file.filename).stem
+    file_bytes = await file.read()
+
+    md_path = rag.ingest_epub(file_bytes, name)
+    chunk_count = rag.index_knowledge()          # 增量索引，只会处理刚写入的文件
+    return {"ok": True, "name": name, "md_path": str(md_path), "new_chunks": chunk_count}
+
+
+@app.get("/knowledge/list")
+async def knowledge_list():
+    """列出所有已转换的知识库文件。"""
+    files = []
+    if rag.KNOWLEDGE_DIR.exists():
+        for md_file in sorted(rag.KNOWLEDGE_DIR.glob("*.md")):
+            col = rag._get_knowledge_col() if rag.is_available() else None
+            indexed = False
+            if col:
+                existing = col.get(where={"source": md_file.stem}, limit=1)
+                indexed = bool(existing["ids"])
+            files.append({
+                "name": md_file.stem,
+                "filename": md_file.name,
+                "size": md_file.stat().st_size,
+                "indexed": indexed,
+            })
+    return {"files": files}
+
+
+@app.get("/knowledge/{name}")
+async def knowledge_content(name: str):
+    """返回某个知识库文件的 Markdown 内容。"""
+    md_path = rag.KNOWLEDGE_DIR / f"{name}.md"
+    if not md_path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return {"name": name, "content": md_path.read_text(encoding="utf-8")}
+
+
 @app.get("/rag/status")
 async def rag_status(session_id: str | None = None):
     return {

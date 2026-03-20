@@ -6,6 +6,7 @@ import { InterviewerTile } from './components/InterviewerTile';
 import { UserTile } from './components/UserTile';
 import { ChatPanel } from './components/ChatPanel';
 import { StatusBadge } from './components/StatusBadge';
+import { KnowledgePanel } from './components/KnowledgePanel';
 import './App.css';
 
 const API_BASE = 'http://localhost:8000';
@@ -19,6 +20,7 @@ export default function App() {
   const [showChat, setShowChat] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resumeStatus, setResumeStatus] = useState<'none' | 'uploading' | 'ready'>('none');
+  const [showKnowledge, setShowKnowledge] = useState(false);
 
   // 每次打开页面生成一个 session ID，用于隔离简历索引
   const sessionIdRef = useRef(crypto.randomUUID());
@@ -226,6 +228,13 @@ export default function App() {
             />
           </label>
           <button
+            className={`btn btn--icon ${showKnowledge ? 'btn--active' : ''}`}
+            onClick={() => setShowKnowledge((v) => !v)}
+            title="知识库管理"
+          >
+            📚
+          </button>
+          <button
             className={`btn btn--icon ${showChat ? 'btn--active' : ''}`}
             onClick={() => setShowChat((v) => !v)}
             title="对话记录"
@@ -254,6 +263,11 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {/* 知识库管理面板 */}
+        {showKnowledge && (
+          <KnowledgePanel onClose={() => setShowKnowledge(false)} />
+        )}
 
         {/* 可选对话面板 */}
         {showChat && (

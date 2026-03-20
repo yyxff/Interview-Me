@@ -162,6 +162,83 @@ def _chunk_pdf(path: str) -> list[str]:
     return chunks
 
 
+# ── EPUB → Markdown ───────────────────────────────────────────────────────────
+
+def epub_to_markdown(file_bytes: bytes) -> str:
+    """
+    将 EPUB 字节流转换为 Markdown 字符串。
+
+    处理逻辑：
+    - 读取 EPUB 中每个 HTML 文档（章节）
+    - 用 html2text 将 HTML 转为 Markdown（保留标题层级）
+    - 跳过正文内容过短的项（封面、版权页、目录等导航页）
+    - 拼接成一个完整的 Markdown 文档
+    """
+    import tempfile
+    import ebooklib
+    from ebooklib import epub
+    import html2text
+    from bs4 import BeautifulSoup
+
+    # html2text 配置
+    converter = html2text.HTML2Text()
+    converter.ignore_links  = True
+    converter.ignore_images = True
+    converter.body_width    = 0      # 不自动换行
+    converter.unicode_snob  = True   # 保留中文 Unicode
+
+    # ebooklib 需要文件路径，写临时文件
+    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        book = epub.read_epub(tmp_path, options={"ignore_ncx": True})
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    sections: list[str] = []
+
+    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+        html_bytes = item.get_content()
+        if not html_bytes:
+            continue
+
+        # 判断是否是实质内容页（跳过封面/目录等）
+        soup = BeautifulSoup(html_bytes, "html.parser")
+        text_preview = soup.get_text().strip()
+        if len(text_preview) < 100:
+            continue
+
+        md = converter.handle(html_bytes.decode("utf-8", errors="replace"))
+        md = md.strip()
+        if md:
+            sections.append(md)
+
+    return "\n\n---\n\n".join(sections)
+
+
+def ingest_epub(file_bytes: bytes, name: str) -> Path:
+    """
+    将 EPUB 转为 Markdown 并保存到 knowledge/<name>.md。
+    如果同名文件已存在，先从向量库删除旧索引再覆盖。
+    返回保存的文件路径。
+    """
+    md_path = KNOWLEDGE_DIR / f"{name}.md"
+    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 若已有同名文件，先清除旧的向量索引
+    if md_path.exists() and is_available():
+        col = _get_knowledge_col()
+        existing = col.get(where={"source": name}, limit=1000)
+        if existing["ids"]:
+            col.delete(ids=existing["ids"])
+
+    markdown = epub_to_markdown(file_bytes)
+    md_path.write_text(markdown, encoding="utf-8")
+    return md_path
+
+
 # ── 索引操作 ───────────────────────────────────────────────────────────────────
 
 def index_knowledge() -> int:

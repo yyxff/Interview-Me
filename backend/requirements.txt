@@ -8,6 +8,9 @@ openai>=1.30.0      # LLM_PROVIDER=openai | openai-compatible
 
 # RAG
 chromadb>=0.5.0
+ebooklib>=0.18          # EPUB 解析
+html2text>=2024.2.26    # HTML → Markdown 转换
+beautifulsoup4>=4.12    # HTML 解析（辅助 ebooklib）
 python-multipart>=0.0.9        # 文件上传支持
 sentence-transformers>=2.7.0   # Embedding 模型（首次运行自动下载 ~130MB）
 pdfplumber>=0.11.0             # 简历 PDF 解析
