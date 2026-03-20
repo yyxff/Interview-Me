@@ -18,6 +18,10 @@ export default function App() {
   const [isStarted, setIsStarted] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resumeStatus, setResumeStatus] = useState<'none' | 'uploading' | 'ready'>('none');
+
+  // 每次打开页面生成一个 session ID，用于隔离简历索引
+  const sessionIdRef = useRef(crypto.randomUUID());
 
   // ---- Refs：在 async/事件回调中安全读取最新状态 ----
   const stateRef = useRef<InterviewState>('idle');
@@ -84,7 +88,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history }),
+        body: JSON.stringify({ message: text, history, session_id: sessionIdRef.current }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -157,6 +161,26 @@ export default function App() {
     recognitionActionsRef.current = { start: startRecognition, stop: stopRecognition };
   }, [startRecognition, stopRecognition]);
 
+  // ---- 简历上传 ----
+  const handleResumeUpload = useCallback(async (file: File) => {
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setError('只支持 PDF 格式的简历');
+      return;
+    }
+    setResumeStatus('uploading');
+    const form = new FormData();
+    form.append('file', file);
+    form.append('session_id', sessionIdRef.current);
+    try {
+      const res = await fetch(`${API_BASE}/upload/resume`, { method: 'POST', body: form });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setResumeStatus('ready');
+    } catch (err) {
+      setError('简历上传失败，请重试');
+      setResumeStatus('none');
+    }
+  }, []);
+
   // ---- 控制 ----
   const handleStart = useCallback(() => {
     setError(null);
@@ -187,6 +211,20 @@ export default function App() {
           <StatusBadge state={state} />
         </div>
         <div className="header-right">
+          <label
+            className={`btn btn--icon ${resumeStatus === 'ready' ? 'btn--active' : ''}`}
+            title={resumeStatus === 'ready' ? '简历已上传' : resumeStatus === 'uploading' ? '上传中…' : '上传简历 PDF'}
+            style={{ cursor: resumeStatus === 'uploading' ? 'wait' : 'pointer' }}
+          >
+            {resumeStatus === 'uploading' ? '⏳' : resumeStatus === 'ready' ? '📄' : '📎'}
+            <input
+              type="file"
+              accept=".pdf"
+              style={{ display: 'none' }}
+              disabled={resumeStatus === 'uploading'}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleResumeUpload(f); }}
+            />
+          </label>
           <button
             className={`btn btn--icon ${showChat ? 'btn--active' : ''}`}
             onClick={() => setShowChat((v) => !v)}
