@@ -42,6 +42,7 @@ interface Note {
   size:       number;
   created_at: string;
   indexing?:  boolean;
+  indexed?:   boolean;   // 已加入知识库
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ function fmtDate(s: string): string {
 
 // ── Knowledge sidebar (left) ───────────────────────────────────────────────────
 
-function KnowledgeSidebar() {
+function KnowledgeSidebar({ indexedNotes }: { indexedNotes: Note[] }) {
   const [files, setFiles]         = useState<KnowledgeFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -163,6 +164,20 @@ function KnowledgeSidebar() {
             </span>
           </div>
         ))}
+
+        {indexedNotes.length > 0 && (
+          <>
+            <div className="kqa-section-divider">知识笔记</div>
+            {indexedNotes.map((n) => (
+              <div key={n.note_id} className="kqa-file-item kqa-file-item--note">
+                <span className="kqa-file-name">{n.title}</span>
+                <span className="kqa-file-meta">
+                  <span className="badge badge--green">已索引</span>
+                </span>
+              </div>
+            ))}
+          </>
+        )}
       </div>
     </aside>
   );
@@ -275,7 +290,10 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
       <aside className="kqa-right">
         <div className="note-expanded-header">
           <button className="btn btn--icon btn--sm" onClick={() => setExpanded(null)}>← 返回</button>
-          <div className="note-expanded-title">{expandedNote.title}</div>
+          <div className="note-expanded-title">
+            {expandedNote.title}
+            {expandedNote.indexed && <span className="note-indexed-badge" title="已加入知识库">知识库</span>}
+          </div>
           <div className="note-expanded-meta">{fmtDate(expandedNote.created_at)}</div>
         </div>
         <pre className="note-expanded-content">{expandedContent}</pre>
@@ -317,11 +335,14 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
               >
                 {n.title}
               </button>
-              <button
-                className="btn btn--icon btn--sm note-delete-btn"
-                onClick={() => handleDelete(n.note_id)}
-                disabled={n.indexing}
-              >✕</button>
+              <div className="note-item-actions">
+                {n.indexed && <span className="note-indexed-badge" title="已加入知识库">知识库</span>}
+                <button
+                  className="btn btn--icon btn--sm note-delete-btn"
+                  onClick={() => handleDelete(n.note_id)}
+                  disabled={n.indexing}
+                >✕</button>
+              </div>
             </div>
             <div className="note-item-meta">
               {n.indexing
@@ -467,11 +488,13 @@ export default function KnowledgeQAPage() {
   const handleIndexNote = async (note_id: string) => {
     const res = await fetch(`${API_BASE}/notes/${note_id}/index`, { method: 'POST' });
     if (!res.ok) throw new Error('index failed');
+    // 乐观更新：标记为已索引（后台线程完成后真正生效）
+    setNotes((prev) => prev.map((n) => n.note_id === note_id ? { ...n, indexed: true } : n));
   };
 
   return (
     <div className="kqa-page">
-      <KnowledgeSidebar />
+      <KnowledgeSidebar indexedNotes={notes.filter((n) => n.indexed && !n.indexing)} />
 
       <div className="qa-main">
         <div className="qa-messages">

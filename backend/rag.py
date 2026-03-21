@@ -692,6 +692,8 @@ def index_note(note_id: str, title: str, text: str) -> None:
                 metadatas=[{"note_id": note_id, "title": title, "text": text}],
             )
             print(f"[rag] 笔记已索引(原文): {note_id}")
+        # 成功后写标记文件，供 list_notes() 读取 indexed 状态
+        (NOTES_DIR / f"{note_id}.indexed").touch()
     except Exception as e:
         print(f"[rag] 笔记索引失败: {e}")
 
@@ -709,6 +711,7 @@ def list_notes() -> list[dict]:
             "title":      title,
             "size":       f.stat().st_size,
             "created_at": f.stem[5:],  # "20240115_103045"
+            "indexed":    (NOTES_DIR / f"{f.stem}.indexed").exists(),
         })
     return notes
 
@@ -728,6 +731,9 @@ def delete_note(note_id: str) -> bool:
     qa_path = NOTES_DIR / f"{note_id}.qa.json"
     if qa_path.exists():
         qa_path.unlink()
+    indexed_path = NOTES_DIR / f"{note_id}.indexed"
+    if indexed_path.exists():
+        indexed_path.unlink()
     if is_available():
         try:
             col = _get_notes_col()
