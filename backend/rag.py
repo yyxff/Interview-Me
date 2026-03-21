@@ -701,14 +701,32 @@ def index_knowledge() -> int:
 
 # ── 检索操作 ───────────────────────────────────────────────────────────────────
 
+def _rrf_merge(ranked_lists: list[list[str]], k: int = 60) -> list[str]:
+    """
+    Reciprocal Rank Fusion：合并多路排序列表。
+    ranked_lists: 每个子列表是 chunk_id 按排名顺序排列（最好在前）。
+    返回按 RRF 分数降序排列的 chunk_id 列表（去重）。
+    """
+    scores: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, cid in enumerate(ranked, start=1):
+            if cid:
+                scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
+    return sorted(scores, key=lambda cid: scores[cid], reverse=True)
+
+
 # cosine distance 阈值：ChromaDB 默认用 L2，bge 系列用余弦距离
 # 余弦距离 ∈ [0, 2]，0=完全相同，越大越不相关
 # 0.9 约对应余弦相似度 ~0.55，经验值，可按实际效果调整
-SIMILARITY_DISTANCE_THRESHOLD = 0.35
+SIMILARITY_DISTANCE_THRESHOLD = 0.70  # L2距离，bge归一化向量下≈cosine_sim>0.755
 
 
-def _safe_query(col, query: str, n: int, where: dict | None = None) -> list[tuple[str, dict]]:
-    """查询，返回 [(document, metadata), ...] 列表，距离超过阈值的结果会被过滤。"""
+def _safe_query(
+    col, query: str, n: int, where: dict | None = None, return_distances: bool = False
+) -> list[tuple[str, dict]] | list[tuple[str, dict, float]]:
+    """查询，返回 [(document, metadata), ...] 列表，距离超过阈值的结果会被过滤。
+    return_distances=True 时返回 [(document, metadata, distance), ...]。
+    """
     try:
         kwargs: dict = {
             "query_texts": [query],
@@ -721,6 +739,11 @@ def _safe_query(col, query: str, n: int, where: dict | None = None) -> list[tupl
         docs      = results.get("documents",  [[]])[0]
         metas     = results.get("metadatas",  [[]])[0]
         distances = results.get("distances",  [[]])[0]
+        if return_distances:
+            return [
+                (d, m, dist) for d, m, dist in zip(docs, metas, distances)
+                if d and dist < SIMILARITY_DISTANCE_THRESHOLD
+            ]
         return [
             (d, m) for d, m, dist in zip(docs, metas, distances)
             if d and dist < SIMILARITY_DISTANCE_THRESHOLD
@@ -743,13 +766,24 @@ def _dedupe_chunks(raw: list[tuple[str, dict]], limit: int) -> list[tuple[str, d
     return result
 
 
-def retrieve_rich(query: str, session_id: str | None = None) -> dict:
+def retrieve_rich(
+    query: str,
+    session_id: str | None = None,
+    extra_chunks: list[dict] | None = None,
+) -> dict:
     """
-    检索流程：bi-encoder 召回 → 阈值过滤 → 去重 → cross-encoder 重排 → 取 top-K
+    精准模式检索流程：
+      bi-encoder 召回 → 阈值过滤 → 去重
+      + extra_chunks（图谱召回）
+      → RRF 融合排序 → cross-encoder 重排 → 取 top-K
+
+    extra_chunks: 图谱召回的 chunk 列表，每项含 {text, source, path, chapter, chunk_id}，
+                  按图谱命中排名顺序传入（最相关在前）。
 
     返回:
         {
-            "knowledge": [{"text":..., "source":..., "path":..., "chapter":..., "chunk_id":..., "question":...}],
+            "knowledge": [{"text":..., "source":..., "path":..., "chapter":..., "chunk_id":...,
+                           "question":..., "via_graph":...}],
             "resume":    [...],
         }
     """
@@ -757,28 +791,100 @@ def retrieve_rich(query: str, session_id: str | None = None) -> dict:
         return {"knowledge": [], "resume": []}
 
     knowledge: list[dict] = []
+    retrieval_log: list[dict] = []   # 供调用方打日志
     try:
         col = _get_knowledge_col()
         if col.count() > 0:
-            # 扩大候选池再去重，给 reranker 更多选择
+            # Step 1: bi-encoder 召回
             n_candidates = min(KNOWLEDGE_TOP_K * QA_PER_CHUNK * 2, col.count())
-            raw = _safe_query(col, query, n_candidates)
+            raw_with_dist = _safe_query(col, query, n_candidates, return_distances=True)
+            raw = [(d, m) for d, m, _ in raw_with_dist]
             candidates = _dedupe_chunks(raw, limit=KNOWLEDGE_TOP_K * 3)
+            dist_map = {m.get("chunk_id", ""): dist for d, m, dist in raw_with_dist}
 
-            # Cross-encoder 重排：传 chunk 原文（而非问题向量文本）
-            rerank_inputs = [(meta.get("text", doc), meta) for doc, meta in candidates]
+            # Step 2: 构建 chunk 数据字典（chunk_id → (text, meta)）
+            cand_map: dict[str, tuple[str, dict]] = {
+                m.get("chunk_id", ""): (m.get("text", doc), m)
+                for doc, m in candidates
+                if m.get("chunk_id")
+            }
+            be_rank = list(cand_map.keys())  # bi-encoder 排名顺序
+
+            # Step 3: 合并图谱 extra_chunks（按传入顺序为排名）
+            extra_map: dict[str, dict] = {}
+            graph_rank: list[str] = []
+            if extra_chunks:
+                for c in extra_chunks:
+                    cid = c.get("chunk_id", "")
+                    if cid:
+                        extra_map[cid] = c
+                        graph_rank.append(cid)
+                        if cid not in cand_map:
+                            # 补充进候选字典，meta 对齐 ChromaDB meta 格式
+                            cand_map[cid] = (c["text"], {
+                                "chunk_id": cid,
+                                "text":     c["text"],
+                                "source":   c.get("source", ""),
+                                "path":     c.get("path", ""),
+                                "chapter":  c.get("chapter", ""),
+                                "question": "",
+                            })
+
+            # Step 4: RRF 融合，同时保留分数供日志
+            be_only  = len(be_rank)
+            gph_only = sum(1 for cid in graph_rank if cid not in set(be_rank))
+            overlap  = sum(1 for cid in graph_rank if cid in set(be_rank))
+            if graph_rank:
+                rrf_scores = {}
+                for ranked_list in [be_rank, graph_rank]:
+                    for rank, cid in enumerate(ranked_list, start=1):
+                        if cid:
+                            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (60 + rank)
+                merged_ids = sorted(rrf_scores, key=lambda c: rrf_scores[c], reverse=True)
+            else:
+                rrf_scores = {}
+                merged_ids = be_rank
+
+            # Step 5: 取 top-N 送 cross-encoder rerank
+            RERANK_LIMIT = max(KNOWLEDGE_TOP_K * 4, 15)
+            rerank_cids = [cid for cid in merged_ids if cid in cand_map][:RERANK_LIMIT]
+            rerank_inputs = [(cand_map[cid][0], cand_map[cid][1]) for cid in rerank_cids]
             ranked = rerank(query, rerank_inputs)
 
-            for doc, meta, _score in ranked[:KNOWLEDGE_TOP_K]:
-                chunk_text = meta.get("text", doc)
+            be_cid_set = set(be_rank)
+            for doc, meta, score in ranked[:KNOWLEDGE_TOP_K]:
+                cid = meta.get("chunk_id", "")
+                graph_only = cid in extra_map and cid not in be_cid_set
                 knowledge.append({
-                    "text":     chunk_text,
-                    "source":   meta.get("source", ""),
-                    "path":     meta.get("path", ""),
-                    "chapter":  meta.get("chapter", meta.get("path", "")),
-                    "chunk_id": meta.get("chunk_id", ""),
-                    "question": meta.get("question", ""),
+                    "text":      meta.get("text", doc),
+                    "source":    meta.get("source", ""),
+                    "path":      meta.get("path", ""),
+                    "chapter":   meta.get("chapter", meta.get("path", "")),
+                    "chunk_id":  cid,
+                    "question":  meta.get("question", ""),
+                    "via_graph": graph_only,
                 })
+                retrieval_log.append({
+                    "chunk_id":     cid,
+                    "source":       meta.get("source", ""),
+                    "bi_dist":      round(dist_map.get(cid, -1), 4),
+                    "rrf_score":    round(rrf_scores.get(cid, 0.0), 6),
+                    "rerank_score": round(score, 4),
+                    "via_graph":    cid in extra_map,
+                    "graph_only":   graph_only,
+                    "question":     meta.get("question", "")[:60],
+                })
+
+            # 汇总信息供调用方打印
+            retrieval_log.append({
+                "_summary": True,
+                "be_candidates":  be_only,
+                "graph_extra":    len(graph_rank),
+                "graph_new":      gph_only,
+                "graph_overlap":  overlap,
+                "rerank_input":   len(rerank_cids),
+                "final_output":   len(knowledge),
+            })
     except Exception:
         pass
 
@@ -819,7 +925,7 @@ def retrieve_rich(query: str, session_id: str | None = None) -> dict:
     except Exception:
         pass
 
-    return {"knowledge": knowledge, "resume": resume, "notes": notes}
+    return {"knowledge": knowledge, "resume": resume, "notes": notes, "retrieval_log": retrieval_log}
 
 
 def retrieve(query: str, session_id: str | None = None) -> dict:

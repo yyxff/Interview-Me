@@ -68,11 +68,12 @@ interface GraphData {
 }
 
 interface QAMessage {
-  id:       string;
-  role:     'user' | 'assistant';
-  content:  string;
-  sources?: Source[];
-  graph?:   GraphData;
+  id:              string;
+  role:            'user' | 'assistant';
+  content:         string;
+  sources?:        Source[];
+  graph?:          GraphData;
+  rewritten_query?: string;
 }
 
 interface Note {
@@ -447,7 +448,7 @@ function GraphPanel({ data, sources, onOpen }: {
     }
   };
 
-  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleClick = async (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -457,10 +458,17 @@ function GraphPanel({ data, sources, onOpen }: {
     const my = (e.clientY - rect.top)  * scaleY;
     const node = simRef.current.find(n => Math.hypot(n.x - mx, n.y - my) < NODE_R + 4);
     if (!node) return;
-    // 找到该节点关联的第一个 source
+    // 优先从已有 sources 中找
     const chunkIds = node.source_chunk_ids ?? [];
+    if (chunkIds.length === 0) return;
     const matched = sources.find(s => chunkIds.includes(s.chunk_id));
-    if (matched) onOpen(matched);
+    if (matched) { onOpen(matched); return; }
+    try {
+      const res = await fetch(`/chunk/${encodeURIComponent(chunkIds[0])}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      onOpen({ ...data, via_graph: true });
+    } catch { /* ignore */ }
   };
 
   if (data.nodes.length === 0) return null;
@@ -960,7 +968,9 @@ export default function KnowledgeQAPage() {
           try {
             const payload = JSON.parse(data);
             if (payload.sources) {
-              setMessages((prev) => prev.map((m) => m.id === aId ? { ...m, sources: payload.sources } : m));
+              setMessages((prev) => prev.map((m) => m.id === aId
+                ? { ...m, sources: payload.sources, rewritten_query: payload.rewritten_query }
+                : m));
             } else if (payload.graph) {
               setMessages((prev) => prev.map((m) => m.id === aId ? { ...m, graph: payload.graph } : m));
             } else if (payload.text) {
@@ -1050,6 +1060,12 @@ export default function KnowledgeQAPage() {
           {messages.map((msg) => (
             <div key={msg.id} className={`qa-msg qa-msg--${msg.role}`}>
               <div className="qa-msg-label">{msg.role === 'user' ? '你' : 'AI'}</div>
+              {msg.role === 'assistant' && msg.rewritten_query && (
+                <div className="qa-sources">
+                  <span className="qa-sources-label">意图补全</span>
+                  <span className="qa-rewritten-chip">🔍 {msg.rewritten_query}</span>
+                </div>
+              )}
               <div className="qa-msg-bubble">
                 {msg.role === 'assistant' && msg.sources?.length && msg.content
                   ? <CitedContent content={msg.content} sources={msg.sources} onOpen={setViewer} />
@@ -1070,7 +1086,7 @@ export default function KnowledgeQAPage() {
                       </div>
                     )}
                     {msg.graph && msg.graph.nodes.length > 0 && (
-                      <GraphPanel data={msg.graph} sources={graphSources} onOpen={setViewer} />
+                      <GraphPanel data={msg.graph} sources={msg.sources!} onOpen={setViewer} />
                     )}
                   </>
                 );

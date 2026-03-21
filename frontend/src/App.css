@@ -817,6 +817,21 @@ body {
   margin-right: 2px;
 }
 
+.qa-rewritten-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-size: 12px;
+  background: rgba(20,184,166,0.1);
+  border: 1px solid rgba(20,184,166,0.35);
+  color: #5eead4;
+  white-space: nowrap;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .qa-source-wrap {
   position: relative;
   display: inline-block;

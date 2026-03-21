@@ -117,11 +117,16 @@ def _load_all_graphs_into_nx():
             for edge in g.get("edges", []):
                 subj = edge["subject"]
                 obj  = edge["object"]
-                # 确保孤立边的节点存在
-                for n in (subj, obj):
+                src_cid = edge.get("source_chunk_id", "")
+                # 确保边的端点节点存在，用边的 source_chunk_id 和 desc 补全缺失信息
+                for n, desc_key in ((subj, "subject_desc"), (obj, "object_desc")):
                     if not G.has_node(n):
-                        G.add_node(n, entity_type="概念", description="",
-                                   source_chunk_ids=[], entity_id="")
+                        G.add_node(n, entity_type="概念",
+                                   description=edge.get(desc_key, ""),
+                                   source_chunk_ids=[src_cid] if src_cid else [],
+                                   entity_id="")
+                    elif src_cid and src_cid not in G.nodes[n].get("source_chunk_ids", []):
+                        G.nodes[n]["source_chunk_ids"].append(src_cid)
                 G.add_edge(subj, obj, **{k: v for k, v in edge.items()
                                           if k not in ("subject", "object")})
         except Exception as e:
@@ -661,9 +666,10 @@ def retrieve_graph(query: str) -> dict:
             return _empty_graph_result()
 
         # Step 1: 实体向量检索
-        raw_ents = rag._safe_query(ent_col, query, ENTITY_TOP_K)
+        raw_ents = rag._safe_query(ent_col, query, ENTITY_TOP_K, return_distances=True)
         entities: list[dict] = []
-        for doc, meta in raw_ents:
+        graph_log: list[dict] = []
+        for doc, meta, dist in raw_ents:
             chunk_ids = [c for c in meta.get("source_chunk_ids_csv", "").split(",") if c]
             entities.append({
                 "name":             meta.get("name", ""),
@@ -671,18 +677,28 @@ def retrieve_graph(query: str) -> dict:
                 "description":      doc,
                 "source_chunk_ids": chunk_ids,
             })
+            graph_log.append({
+                "type": "entity",
+                "name": meta.get("name", ""),
+                "dist": round(dist, 4),
+            })
 
         # Step 2: 关系向量检索
         relations: list[dict] = []
         if rel_col.count() > 0:
-            raw_rels = rag._safe_query(rel_col, query, RELATION_TOP_K)
-            for doc, meta in raw_rels:
+            raw_rels = rag._safe_query(rel_col, query, RELATION_TOP_K, return_distances=True)
+            for doc, meta, dist in raw_rels:
                 relations.append({
                     "subject":         meta.get("subject", ""),
                     "predicate":       meta.get("predicate", ""),
                     "object":          meta.get("object", ""),
                     "description":     doc,
                     "source_chunk_id": meta.get("source_chunk_id", ""),
+                })
+                graph_log.append({
+                    "type":      "relation",
+                    "triple":    f"{meta.get('subject','')} --{meta.get('predicate','')}--> {meta.get('object','')}",
+                    "dist":      round(dist, 4),
                 })
 
         # Step 3: 合并去重——只取命中实体 + 命中关系的 chunk（不展开 BFS 邻居）
@@ -710,6 +726,7 @@ def retrieve_graph(query: str) -> dict:
             "relations":        relations,
             "source_chunk_ids": all_chunk_ids,
             "graph_summary":    graph_summary,
+            "graph_log":        graph_log,
         }
 
     except Exception as e:
@@ -772,7 +789,16 @@ def get_subgraph_for_viz(query: str) -> dict:
             return {"nodes": [], "edges": []}
 
         raw_ents = rag._safe_query(ent_col, query, ENTITY_TOP_K)
-        used_names: set[str] = {meta.get("name", "") for _, meta in raw_ents}
+        # 从 ChromaDB 结果直接拿 chunk_ids（比 NetworkX 属性更准确）
+        used_names: set[str] = set()
+        used_chunk_ids: dict[str, list[str]] = {}  # name → chunk_ids
+        for _, meta in raw_ents:
+            name = meta.get("name", "")
+            if name:
+                used_names.add(name)
+                cids = [c for c in meta.get("source_chunk_ids_csv", "").split(",") if c]
+                used_chunk_ids.setdefault(name, [])
+                used_chunk_ids[name] = list(dict.fromkeys(used_chunk_ids[name] + cids))
 
         used_rel_keys: set[tuple[str, str]] = set()
         if rel_col.count() > 0:
@@ -797,11 +823,15 @@ def get_subgraph_for_viz(query: str) -> dict:
         nodes = []
         for name in all_names:
             attrs = dict(G.nodes[name]) if name in G else {}
+            if name in used_chunk_ids:
+                chunk_ids = used_chunk_ids[name]
+            else:
+                chunk_ids = attrs.get("source_chunk_ids", [])
             nodes.append({
                 "id":               name,
                 "entity_type":      attrs.get("entity_type", "概念"),
                 "description":      attrs.get("description", ""),
-                "source_chunk_ids": attrs.get("source_chunk_ids", []),
+                "source_chunk_ids": chunk_ids,
                 "used":             name in used_names,
                 "adjacent":         name in adjacent_names,
             })
