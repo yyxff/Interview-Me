@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import AsyncIterator, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -37,6 +38,14 @@ import rag
 
 
 # ── System Prompt ────────────────────────────────────────────────────────────
+
+QA_SYSTEM_PROMPT = """你是一位技术知识助手，专注于软件工程领域的问题解答。
+
+## 参考资料使用规范
+1. 先判断每条参考资料与用户问题是否相关，**不相关的资料直接忽略**，不要强行引用
+2. 若所有资料均与问题无关，直接说明"知识库中暂无相关内容"，然后用通用知识回答并明确标注
+3. 若资料部分相关，只提取相关部分；引用时用 [1][2] 等序号标注
+4. **严禁**将无关资料强行套用到答案中"""
 
 SYSTEM_PROMPT = """你是一位经验丰富的技术面试官，专注于软件工程领域。你的风格是：
 - 问题由浅入深，先考察基础再深挖原理
@@ -54,12 +63,13 @@ def build_prompt(session_id: str | None, query: str) -> str:
     prompt = SYSTEM_PROMPT
 
     if ctx["resume"]:
-        resume_text = "\n\n".join(ctx["resume"])
-        prompt += f"\n\n## 候选人简历（相关片段）\n{resume_text}"
+        prompt += f"\n\n## 候选人简历（相关片段）\n" + "\n\n".join(ctx["resume"])
 
     if ctx["knowledge"]:
-        knowledge_text = "\n\n---\n\n".join(ctx["knowledge"])
-        prompt += f"\n\n## 相关技术参考\n{knowledge_text}"
+        prompt += f"\n\n## 相关技术参考\n" + "\n\n---\n\n".join(ctx["knowledge"])
+
+    if ctx.get("notes"):
+        prompt += f"\n\n## 候选人知识笔记\n" + "\n\n---\n\n".join(ctx["notes"])
 
     return prompt
 
@@ -196,7 +206,14 @@ app = FastAPI(title="Interview Me", version="0.2.0")
 async def startup():
     """启动时在后台索引知识库（不阻塞服务启动）。"""
     import asyncio
-    asyncio.get_event_loop().run_in_executor(None, rag.index_knowledge)
+
+    async def _run():
+        try:
+            await rag.index_knowledge_with_qa(_provider)
+        except Exception as e:
+            print(f"[startup] 索引任务异常: {e}")
+
+    asyncio.create_task(_run())
 
 
 app.add_middleware(
@@ -230,6 +247,11 @@ class ChatRequest(BaseModel):
     message: str
     history: list[HistoryItem] = []
     session_id: str | None = None
+
+
+class QARequest(BaseModel):
+    message: str
+    history: list[HistoryItem] = []
 
 
 class ChatResponse(BaseModel):
@@ -280,7 +302,7 @@ async def upload_knowledge(file: UploadFile = File(...)):
     file_bytes = await file.read()
 
     md_path = rag.ingest_epub(file_bytes, name)
-    chunk_count = rag.index_knowledge()          # 增量索引，只会处理刚写入的文件
+    chunk_count = await rag.index_knowledge_with_qa(_provider)  # 增量索引，只处理新文件
     return {"ok": True, "name": name, "md_path": str(md_path), "new_chunks": chunk_count}
 
 
@@ -320,6 +342,12 @@ async def rag_status(session_id: str | None = None):
         "knowledge_chunks": rag.knowledge_count(),
         "has_resume": rag.has_resume(session_id) if session_id else False,
     }
+
+
+@app.get("/rag/index-progress")
+async def rag_index_progress():
+    """返回知识库索引进度，供前端轮询。"""
+    return rag.get_index_progress()
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -372,3 +400,158 @@ async def chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",  # 禁止 nginx 缓冲
         },
     )
+
+
+@app.post("/qa/stream")
+async def qa_stream(req: QARequest):
+    """基于知识库的问答：先发 sources 事件，再流式发 LLM 回复。"""
+    result = rag.retrieve_rich(req.message)
+    knowledge = result["knowledge"]
+
+    sources_payload = [
+        {
+            "source":   c["source"],
+            "chapter":  c["chapter"],
+            "chunk_id": c["chunk_id"],
+            "text":     c["text"],      # 完整原文，供前端预览/展开
+        }
+        for c in knowledge
+    ]
+
+    messages = [{"role": m.role, "content": m.content} for m in trim_history(req.history)]
+    messages.append({"role": "user", "content": req.message})
+
+    # 组装 system prompt（仅含知识库内容，不含简历）
+    system = QA_SYSTEM_PROMPT
+    if knowledge:
+        refs = "\n\n---\n\n".join(
+            f"[{i+1}] 来源：{c['source']} > {c['chapter']}\n{c['text']}"
+            for i, c in enumerate(knowledge)
+        )
+        system += f"\n\n## 参考资料\n{refs}"
+
+    async def _generate():
+        # 第一个事件：来源列表
+        yield f"data: {json.dumps({'sources': sources_payload}, ensure_ascii=False)}\n\n"
+
+        if _provider is None:
+            yield f"data: {json.dumps({'text': '请配置 LLM_PROVIDER 和 LLM_API_KEY'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        try:
+            async for chunk in _provider.stream_chat(messages, system):
+                yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── 知识笔记 ──────────────────────────────────────────────────────────────────
+
+SUMMARIZE_PROMPT = """请将以下问答对话整理为结构化的知识点笔记，输出 JSON（只输出 JSON，不要加代码块或其他文字）。
+
+格式：
+{
+  "title": "笔记标题",
+  "questions": ["针对此知识点的典型面试问题1", "问题2", "问题3", "问题4"],
+  "content": "Markdown 格式正文，分条列出核心知识点"
+}
+
+要求：
+- questions 生成 4-6 个，覆盖不同角度和难度，用于后续向量化检索
+- content 去除对话冗余，只保留知识本身，语言简洁准确"""
+
+
+class SummarizeRequest(BaseModel):
+    messages: list[HistoryItem]
+
+
+class SaveNoteRequest(BaseModel):
+    title:     str
+    content:   str
+    questions: list[str] = []
+
+
+@app.post("/qa/summarize")
+async def qa_summarize(req: SummarizeRequest):
+    """将对话总结为知识点笔记（非流式）。"""
+    if _provider is None:
+        raise HTTPException(status_code=503, detail="LLM 未配置")
+
+    conv = "\n".join(
+        f"{'用户' if m.role == 'user' else 'AI'}: {m.content}"
+        for m in req.messages
+    )
+    try:
+        text = await _provider.chat(
+            messages=[{"role": "user", "content": f"对话内容：\n\n{conv}"}],
+            system=SUMMARIZE_PROMPT,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    try:
+        import json as _json
+        data      = _json.loads(text.strip())
+        title     = data.get("title", "笔记").strip()
+        questions = data.get("questions", [])
+        content   = data.get("content", "").strip()
+    except Exception:
+        # 解析失败时降级：第一行为标题，其余为正文
+        lines     = text.strip().split("\n", 1)
+        title     = lines[0].strip()
+        questions = []
+        content   = lines[1].strip() if len(lines) > 1 else ""
+    return {"title": title, "content": content, "questions": questions}
+
+
+@app.post("/notes/save")
+async def notes_save(req: SaveNoteRequest):
+    note_id, text = rag.save_note_file(req.title, req.content, req.questions)
+    return {
+        "note_id":    note_id,
+        "title":      req.title,
+        "created_at": note_id[5:],   # "20240115_103045"
+        "size":       len(text.encode()),
+    }
+
+
+@app.post("/notes/{note_id}/index")
+async def notes_index(note_id: str):
+    import asyncio
+    content = rag.get_note(note_id)
+    if content is None:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    notes = rag.list_notes()
+    note  = next((n for n in notes if n["note_id"] == note_id), None)
+    title = note["title"] if note else note_id
+    asyncio.create_task(asyncio.to_thread(rag.index_note, note_id, title, content))
+    return {"ok": True}
+
+
+@app.get("/notes/list")
+async def notes_list():
+    return {"notes": rag.list_notes()}
+
+
+@app.get("/notes/{note_id}")
+async def notes_get(note_id: str):
+    content = rag.get_note(note_id)
+    if content is None:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    return {"note_id": note_id, "content": content}
+
+
+@app.delete("/notes/{note_id}")
+async def notes_delete(note_id: str):
+    ok = rag.delete_note(note_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    return {"ok": True}
