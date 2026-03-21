@@ -385,7 +385,88 @@ body {
 .knowledge-viewer-content::-webkit-scrollbar-track { background: transparent; }
 .knowledge-viewer-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-/* ===== QA Page ===== */
+/* ===== Knowledge + QA three-column page ===== */
+.kqa-page {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+  gap: 12px;
+}
+
+.kqa-left,
+.kqa-right {
+  width: 250px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-tile);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.kqa-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.kqa-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kqa-file-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.kqa-file-list::-webkit-scrollbar { width: 4px; }
+.kqa-file-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.kqa-file-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  transition: border-color 0.1s;
+}
+.kqa-file-item:hover { border-color: rgba(99,102,241,0.35); }
+
+.kqa-file-name {
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.kqa-file-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.kqa-empty {
+  padding: 14px 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+/* ===== QA Page (legacy, kept for .qa-main reuse) ===== */
 .qa-page {
   flex: 1;
   display: flex;
@@ -1382,6 +1463,12 @@ body {
   color: #fff;
 }
 .btn--danger:hover { background: #dc2626; }
+
+.btn--success {
+  background: var(--green);
+  color: #fff;
+}
+.btn--success:hover { background: #16a34a; }
 
 .btn--icon {
   background: transparent;

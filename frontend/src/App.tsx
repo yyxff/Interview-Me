@@ -1,8 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 import HomePage from './pages/HomePage';
 import InterviewPage from './pages/InterviewPage';
-import KnowledgePage from './pages/KnowledgePage';
-import QAPage from './pages/QAPage';
+import KnowledgeQAPage from './pages/KnowledgeQAPage';
 import './App.css';
 
 export default function App() {
@@ -21,10 +20,7 @@ export default function App() {
             模拟面试
           </NavLink>
           <NavLink to="/knowledge" className={({ isActive }) => `nav-link${isActive ? ' nav-link--active' : ''}`}>
-            知识库
-          </NavLink>
-          <NavLink to="/qa" className={({ isActive }) => `nav-link${isActive ? ' nav-link--active' : ''}`}>
-            知识问答
+            知识库 & 问答
           </NavLink>
         </div>
       </nav>
@@ -33,8 +29,8 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/interview" element={<InterviewPage />} />
-          <Route path="/knowledge" element={<KnowledgePage />} />
-          <Route path="/qa" element={<QAPage />} />
+          <Route path="/knowledge" element={<KnowledgeQAPage />} />
+          <Route path="/qa" element={<KnowledgeQAPage />} />
         </Routes>
       </div>
     </div>
