@@ -507,8 +507,11 @@ async def qa_summarize(req: SummarizeRequest):
         raise HTTPException(status_code=502, detail=str(e))
 
     try:
-        import json as _json
-        data      = _json.loads(text.strip())
+        import json as _json, re as _re
+        # 去除 LLM 可能包裹的 ```json ... ``` 代码块标记
+        cleaned = _re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=_re.IGNORECASE)
+        cleaned = _re.sub(r'\s*```\s*$', '', cleaned)
+        data      = _json.loads(cleaned)
         title     = data.get("title", "笔记").strip()
         questions = data.get("questions", [])
         content   = data.get("content", "").strip()

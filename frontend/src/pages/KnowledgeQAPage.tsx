@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -296,7 +297,9 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
           </div>
           <div className="note-expanded-meta">{fmtDate(expandedNote.created_at)}</div>
         </div>
-        <pre className="note-expanded-content">{expandedContent}</pre>
+        <div className="note-expanded-content note-expanded-content--md">
+          <ReactMarkdown>{expandedContent}</ReactMarkdown>
+        </div>
         <div className="note-expanded-footer">
           <button
             className={`btn btn--sm ${indexStatus === 'ok' ? 'btn--success' : indexStatus === 'error' ? 'btn--danger' : 'btn--primary'}`}

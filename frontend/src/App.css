@@ -649,6 +649,48 @@ body {
 .note-expanded-content::-webkit-scrollbar { width: 4px; }
 .note-expanded-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
+/* Markdown rendering inside notes */
+.note-expanded-content--md {
+  white-space: normal;
+}
+.note-expanded-content--md h1,
+.note-expanded-content--md h2,
+.note-expanded-content--md h3 {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 10px 0 4px;
+  line-height: 1.4;
+}
+.note-expanded-content--md h1 { font-size: 14px; }
+.note-expanded-content--md p  { margin: 4px 0; }
+.note-expanded-content--md ul,
+.note-expanded-content--md ol {
+  padding-left: 16px;
+  margin: 4px 0;
+}
+.note-expanded-content--md li { margin: 2px 0; }
+.note-expanded-content--md strong { color: var(--text); font-weight: 600; }
+.note-expanded-content--md code {
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 11px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.note-expanded-content--md pre {
+  background: rgba(255,255,255,0.05);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.note-expanded-content--md pre code {
+  background: none;
+  padding: 0;
+  font-size: 11px;
+}
+
 .note-expanded-footer {
   padding: 10px 14px;
   border-top: 1px solid var(--border);
