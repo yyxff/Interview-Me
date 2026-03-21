@@ -167,41 +167,116 @@ def _get_notes_col():
 def _chunk_markdown(text: str, source: str) -> list[dict]:
     """
     按 ## 标题切割 Markdown，每块 ≤800 字符。
-    返回 [{"text": ..., "source": ..., "chapter": ...}, ...]
+    线性扫描追踪 H1/H2/H3 层级，每个 chunk 携带完整路径。
+    返回 [{"text", "source", "path", "h1", "h2", "h3", "chapter"}, ...]
     """
     chunks: list[dict] = []
-    sections = re.split(r'\n(?=## )', text.strip())
+    h1 = h2 = h3 = ""
 
-    for section in sections:
-        section = section.strip()
-        if not section:
+    # 按行扫描，遇到 ## 边界则切节
+    lines = text.split('\n')
+    sections: list[tuple[str, str, str, str]] = []  # (section_text, h1, h2, h3_at_start)
+    current_lines: list[str] = []
+    current_h1 = current_h2 = current_h3 = ""
+
+    for line in lines:
+        stripped = line.strip()
+        # H1（单 #，不包含 ##）— 先 flush 旧节再更新 h1
+        if re.match(r'^# [^#]', stripped):
+            if current_lines:
+                sections.append(('\n'.join(current_lines), current_h1, current_h2, current_h3))
+                current_lines = []
+            current_h1 = stripped.lstrip('#').strip()
+            current_h2 = current_h3 = ""
+            # H1 行本身不加入 chunk 内容（只是章节标题）
+        # H2 分节边界
+        elif re.match(r'^## [^#]', stripped):
+            if current_lines:
+                sections.append(('\n'.join(current_lines), current_h1, current_h2, current_h3))
+            current_h2 = stripped.lstrip('#').strip()
+            current_h3 = ""
+            current_lines = [line]
+        else:
+            # 记录 H3（分段内部，不作为切割边界）
+            if re.match(r'^### [^#]', stripped):
+                current_h3 = stripped.lstrip('#').strip()
+            current_lines.append(line)
+
+    if current_lines:
+        sections.append(('\n'.join(current_lines), current_h1, current_h2, current_h3))
+
+    def _make_path(h1v: str, h2v: str, h3v: str) -> str:
+        return " > ".join(p for p in [h1v, h2v, h3v] if p)
+
+    for section_text, s_h1, s_h2, _ in sections:
+        section_text = section_text.strip()
+        if not section_text:
             continue
 
-        # 提取章节标题（## 行）
-        first_line = section.split('\n', 1)[0]
-        chapter = first_line.lstrip('#').strip() if first_line.startswith('#') else ''
+        # 在分段过程中实时追踪 h3
+        running_h3 = ""
 
-        if len(section) <= 800:
-            chunks.append({"text": section, "source": source, "chapter": chapter})
+        def _make_chunk(text_body: str, cur_h3: str) -> dict:
+            path = _make_path(s_h1, s_h2, cur_h3)
+            return {
+                "text":    text_body,
+                "source":  source,
+                "path":    path,
+                "h1":      s_h1,
+                "h2":      s_h2,
+                "h3":      cur_h3,
+                "chapter": s_h2,  # 向后兼容
+            }
+
+        if len(section_text) <= 800:
+            # 先扫一遍取最末 h3
+            for ln in section_text.split('\n'):
+                if re.match(r'^### [^#]', ln.strip()):
+                    running_h3 = ln.strip().lstrip('#').strip()
+            chunks.append(_make_chunk(section_text, running_h3))
         else:
-            lines = section.split('\n', 1)
-            header = lines[0] if len(lines) > 1 else ''
-            body   = lines[1] if len(lines) > 1 else lines[0]
+            sec_lines = section_text.split('\n', 1)
+            header = sec_lines[0] if len(sec_lines) > 1 else ''
+            body   = sec_lines[1] if len(sec_lines) > 1 else sec_lines[0]
             paragraphs = re.split(r'\n{2,}', body)
 
             current = header
+            current_h3_local = ""
             for para in paragraphs:
                 para = para.strip()
                 if not para:
                     continue
+                # 更新 h3 状态
+                for ln in para.split('\n'):
+                    if re.match(r'^### [^#]', ln.strip()):
+                        current_h3_local = ln.strip().lstrip('#').strip()
                 if len(current) + len(para) + 2 > 800 and current != header:
-                    chunks.append({"text": current.strip(), "source": source, "chapter": chapter})
+                    chunks.append(_make_chunk(current.strip(), current_h3_local))
                     current = header + '\n\n' + para
                 else:
                     current += '\n\n' + para
             if current.strip() and current.strip() != header.strip():
-                chunks.append({"text": current.strip(), "source": source, "chapter": chapter})
+                chunks.append(_make_chunk(current.strip(), current_h3_local))
 
+    return chunks
+
+
+def _load_or_build_chunks(md_file: Path, source: str) -> list[dict]:
+    """
+    若 .chunks.json 存在则直接加载，否则切分并持久化。
+    重新切分时删除旧 .chunks.json 即可。
+    """
+    import json as _json
+    chunks_path = md_file.with_suffix('.chunks.json')
+    if chunks_path.exists():
+        try:
+            return _json.loads(chunks_path.read_text(encoding='utf-8'))
+        except Exception:
+            pass
+    chunks = _chunk_markdown(md_file.read_text(encoding='utf-8'), source)
+    chunks_path.write_text(
+        _json.dumps(chunks, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
     return chunks
 
 
@@ -331,8 +406,7 @@ async def index_knowledge_with_qa(provider: "LLMProvider | None" = None) -> int:
         existing = col.get(where={"source": md_file.stem}, limit=1)
         if existing["ids"]:
             continue
-        text = md_file.read_text(encoding="utf-8")
-        chunks = _chunk_markdown(text, md_file.stem)
+        chunks = _load_or_build_chunks(md_file, md_file.stem)
         if chunks:
             pending.append((md_file, chunks))
 
@@ -368,6 +442,7 @@ async def index_knowledge_with_qa(provider: "LLMProvider | None" = None) -> int:
                 chunk_id   = f"{source}_{i}"
                 chunk_text = chunk["text"]
                 chapter    = chunk.get("chapter", "")
+                path       = chunk.get("path", chapter)
 
                 if provider:
                     questions = await _generate_questions(chunk_text, provider)
@@ -377,20 +452,30 @@ async def index_knowledge_with_qa(provider: "LLMProvider | None" = None) -> int:
                 if questions:
                     for j, q in enumerate(questions):
                         ids.append(f"{chunk_id}_q{j}")
-                        documents.append(chunk_text)
+                        documents.append(q)          # embed 问题向量
                         metadatas.append({
                             "source":   source,
-                            "chapter":  chapter,
+                            "path":     path,
+                            "h1":       chunk.get("h1", ""),
+                            "h2":       chunk.get("h2", ""),
+                            "h3":       chunk.get("h3", ""),
+                            "chapter":  chapter,     # 向后兼容
                             "chunk_id": chunk_id,
                             "question": q,
+                            "text":     chunk_text,  # 原文存 metadata
                         })
                 else:
                     ids.append(chunk_id)
-                    documents.append(chunk_text)
+                    documents.append(chunk_text)     # 无 QA 时降级嵌入原文
                     metadatas.append({
                         "source":   source,
+                        "path":     path,
+                        "h1":       chunk.get("h1", ""),
+                        "h2":       chunk.get("h2", ""),
+                        "h3":       chunk.get("h3", ""),
                         "chapter":  chapter,
                         "chunk_id": chunk_id,
+                        "text":     chunk_text,
                     })
 
                 # 更新进度
@@ -474,7 +559,7 @@ def retrieve_rich(query: str, session_id: str | None = None) -> dict:
 
     返回:
         {
-            "knowledge": [{"text":..., "source":..., "chapter":..., "chunk_id":..., "question":...}],
+            "knowledge": [{"text":..., "source":..., "path":..., "chapter":..., "chunk_id":..., "question":...}],
             "resume":    [...],
         }
     """
@@ -490,15 +575,18 @@ def retrieve_rich(query: str, session_id: str | None = None) -> dict:
             raw = _safe_query(col, query, n_candidates)
             candidates = _dedupe_chunks(raw, limit=KNOWLEDGE_TOP_K * 3)
 
-            # Cross-encoder 重排
-            ranked = rerank(query, candidates)
+            # Cross-encoder 重排：传 chunk 原文（而非问题向量文本）
+            rerank_inputs = [(meta.get("text", doc), meta) for doc, meta in candidates]
+            ranked = rerank(query, rerank_inputs)
 
             for doc, meta, _score in ranked[:KNOWLEDGE_TOP_K]:
+                chunk_text = meta.get("text", doc)
                 knowledge.append({
-                    "text":     doc,
+                    "text":     chunk_text,
                     "source":   meta.get("source", ""),
-                    "chapter":  meta.get("chapter", ""),
-                    "chunk_id": meta.get("chunk_id", doc[:30]),
+                    "path":     meta.get("path", ""),
+                    "chapter":  meta.get("chapter", meta.get("path", "")),
+                    "chunk_id": meta.get("chunk_id", ""),
                     "question": meta.get("question", ""),
                 })
     except Exception:

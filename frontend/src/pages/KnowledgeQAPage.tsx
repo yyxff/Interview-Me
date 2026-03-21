@@ -25,6 +25,7 @@ interface IndexProgress {
 
 interface Source {
   source:   string;
+  path?:    string;
   chapter:  string;
   chunk_id: string;
   text:     string;
@@ -199,7 +200,7 @@ function SourceChip({ index, source, onOpen }: {
         onMouseLeave={() => setHovered(false)}
         onClick={() => onOpen(source)}
       >
-        [{index + 1}] {source.chapter || source.source}
+        [{index + 1}] {source.path || source.chapter || source.source}
       </button>
       {hovered && (
         <div className="qa-source-tooltip">
@@ -233,7 +234,7 @@ function InlineCitation({ num, source, onOpen }: {
       </button>
       {hovered && (
         <div className="qa-cite-tooltip">
-          <div className="qa-source-tooltip-title">{source.source}{source.chapter ? ` › ${source.chapter}` : ''}</div>
+          <div className="qa-source-tooltip-title">{source.source}{(source.path || source.chapter) ? ` › ${source.path || source.chapter}` : ''}</div>
           <div className="qa-source-tooltip-text">
             {source.text.slice(0, 220)}{source.text.length > 220 ? '…' : ''}
           </div>

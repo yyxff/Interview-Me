@@ -90,16 +90,18 @@ def _print_knowledge_hits(
 
     for i, (doc, meta, score) in enumerate(display, 1):
         source   = meta.get("source", "?")
-        chapter  = meta.get("chapter", "")
+        path     = meta.get("path", "") or meta.get("chapter", "")
         question = meta.get("question", "")
         chunk_id = meta.get("chunk_id", "?")
+        # 原文：新版存在 metadata["text"]，旧版在 doc 里
+        chunk_text = meta.get("text", doc)
         # 找回原始 bi-encoder 距离
         orig_dist = next(
             (d for dd, mm, d in hits
              if mm.get("chunk_id") == chunk_id and dd == doc),
             None,
         )
-        loc = source + (f" > {chapter}" if chapter else "")
+        loc = source + (f" > {path}" if path else "")
         print(f"[{i}] {loc}")
         if ranked is not None:
             print(f"    {label}={score:.4f}", end="")
@@ -111,8 +113,8 @@ def _print_knowledge_hits(
         print(f"    chunk_id : {chunk_id}")
         if question:
             print(f"    命中问题 : {question}")
-        preview = doc.replace("\n", " ").strip()[:300]
-        print(f"    原文预览 : {preview}{'…' if len(doc) > 300 else ''}")
+        preview = chunk_text.replace("\n", " ").strip()[:300]
+        print(f"    原文预览 : {preview}{'…' if len(chunk_text) > 300 else ''}")
         print()
 
     # 展示被过滤的条目（距离太大）
