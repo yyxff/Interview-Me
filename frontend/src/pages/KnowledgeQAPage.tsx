@@ -245,16 +245,18 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
   onRefresh: () => void;
   onIndex:   (note_id: string) => Promise<void>;
 }) {
-  const [expanded, setExpanded]           = useState<string | null>(null);
+  const [expanded, setExpanded]               = useState<string | null>(null);
   const [expandedContent, setExpandedContent] = useState('');
-  const [indexing, setIndexing]           = useState(false);
-  const [indexStatus, setIndexStatus]     = useState<'idle' | 'ok' | 'error'>('idle');
+  const [expandedQuestions, setExpandedQuestions] = useState<string[]>([]);
+  const [indexing, setIndexing]               = useState(false);
+  const [indexStatus, setIndexStatus]         = useState<'idle' | 'ok' | 'error'>('idle');
 
   const handleExpand = async (note_id: string) => {
     try {
       const res  = await fetch(`${API_BASE}/notes/${note_id}`);
       const data = await res.json();
       setExpandedContent(data.content ?? '');
+      setExpandedQuestions(data.questions ?? []);
       setExpanded(note_id);
       setIndexStatus('idle');
     } catch { /* ignore */ }
@@ -300,6 +302,17 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
         <div className="note-expanded-content note-expanded-content--md">
           <ReactMarkdown>{expandedContent}</ReactMarkdown>
         </div>
+        {expandedQuestions.length > 0 && (
+          <div className="note-questions">
+            <div className="note-questions-label">相关问题</div>
+            {expandedQuestions.map((q, i) => (
+              <div key={i} className="note-question-item">
+                <span className="note-question-num">Q{i + 1}</span>
+                {q}
+              </div>
+            ))}
+          </div>
+        )}
         <div className="note-expanded-footer">
           <button
             className={`btn btn--sm ${indexStatus === 'ok' ? 'btn--success' : indexStatus === 'error' ? 'btn--danger' : 'btn--primary'}`}

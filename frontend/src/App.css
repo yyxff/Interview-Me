@@ -691,6 +691,40 @@ body {
   font-size: 11px;
 }
 
+.note-questions {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.note-questions-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+
+.note-question-item {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.note-question-num {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
 .note-expanded-footer {
   padding: 10px 14px;
   border-top: 1px solid var(--border);

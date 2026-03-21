@@ -722,6 +722,15 @@ def get_note(note_id: str) -> str | None:
     return path.read_text(encoding="utf-8") if path.exists() else None
 
 
+def get_note_questions(note_id: str) -> list[str]:
+    """返回笔记对应的问题列表，不存在则返回空列表。"""
+    import json as _json
+    qa_path = NOTES_DIR / f"{note_id}.qa.json"
+    if not qa_path.exists():
+        return []
+    return _json.loads(qa_path.read_text(encoding="utf-8")).get("questions", [])
+
+
 def delete_note(note_id: str) -> bool:
     """删除笔记文件、qa.json 和向量索引，返回是否成功。"""
     path = NOTES_DIR / f"{note_id}.md"

@@ -558,7 +558,8 @@ async def notes_get(note_id: str):
     content = rag.get_note(note_id)
     if content is None:
         raise HTTPException(status_code=404, detail="笔记不存在")
-    return {"note_id": note_id, "content": content}
+    questions = rag.get_note_questions(note_id)
+    return {"note_id": note_id, "content": content, "questions": questions}
 
 
 @app.delete("/notes/{note_id}")
