@@ -208,10 +208,27 @@ async def startup():
     import asyncio
 
     async def _run():
+        # ── 向量 RAG 索引（增量，跳过已在 ChromaDB 中的 source）
         try:
             await rag.index_knowledge_with_qa(_provider)
         except Exception as e:
-            print(f"[startup] 索引任务异常: {e}")
+            print(f"[startup] 向量索引任务异常: {e}")
+
+        # ── QA 缓存回填（已索引但缺少 .qa.json 时从 ChromaDB 还原）
+        try:
+            filled = rag.backfill_qa_cache()
+            if filled:
+                print(f"[startup] QA 缓存回填完成: {filled}")
+        except Exception as e:
+            print(f"[startup] QA 缓存回填失败: {e}")
+
+        # ── 图 RAG 索引（跳过已有 .graph.json 的 source，断点续传 .graph.partial.json）
+        if _provider is not None:
+            try:
+                import graph_rag as _gr
+                await _gr.index_knowledge_graph(_provider)
+            except Exception as e:
+                print(f"[startup] 图索引任务异常: {e}")
 
     asyncio.create_task(_run())
 
@@ -303,6 +320,20 @@ async def upload_knowledge(file: UploadFile = File(...)):
 
     md_path = rag.ingest_epub(file_bytes, name)
     chunk_count = await rag.index_knowledge_with_qa(_provider)  # 增量索引，只处理新文件
+
+    # 在后台启动图索引（跳过已有 .graph.json 的 source）
+    if _provider is not None:
+        import asyncio as _asyncio
+
+        async def _run_graph():
+            try:
+                import graph_rag as _gr
+                await _gr.index_knowledge_graph(_provider)
+            except Exception as e:
+                print(f"[upload/knowledge] 图索引失败: {e}")
+
+        _asyncio.create_task(_run_graph())
+
     return {"ok": True, "name": name, "md_path": str(md_path), "new_chunks": chunk_count}
 
 
@@ -409,14 +440,36 @@ async def qa_stream(req: QARequest):
     knowledge = result["knowledge"]
     notes     = result.get("notes", [])
 
-    # sources 包含知识库和笔记，前端统一展示
-    all_sources = knowledge + notes
+    # Graph RAG 检索
+    graph_result    = rag.retrieve_graph(req.message)
+    graph_chunk_ids = graph_result.get("source_chunk_ids", [])
+    graph_summary   = graph_result.get("graph_summary", "")
+
+    # 用 graph 找到的 chunk_ids 补充额外原文（去除已有的）
+    graph_chunks: list[dict] = []
+    graph_viz: dict = {}
+    try:
+        import graph_rag as _gr
+        if graph_chunk_ids:
+            existing_ids = {c["chunk_id"] for c in knowledge}
+            extra = _gr.get_chunks_by_ids(graph_chunk_ids)
+            graph_chunks = [c for c in extra if c["chunk_id"] not in existing_ids]
+        if graph_result.get("entities"):
+            graph_viz = _gr.get_subgraph_for_viz(req.message)
+    except Exception:
+        pass
+
+    # sources 包含知识库、笔记、图谱补充 chunk，前端统一展示
+    all_knowledge = knowledge + graph_chunks
+    all_sources   = all_knowledge + notes
     sources_payload = [
         {
-            "source":   c["source"],
-            "chapter":  c["chapter"],
-            "chunk_id": c["chunk_id"],
-            "text":     c["text"],
+            "source":    c["source"],
+            "path":      c.get("path", ""),
+            "chapter":   c["chapter"],
+            "chunk_id":  c["chunk_id"],
+            "text":      c["text"],
+            "via_graph": c in graph_chunks,
         }
         for c in all_sources
     ]
@@ -426,10 +479,10 @@ async def qa_stream(req: QARequest):
 
     # 组装 system prompt
     system = QA_SYSTEM_PROMPT
-    if knowledge:
+    if all_knowledge:
         refs = "\n\n---\n\n".join(
-            f"[{i+1}] 来源：{c['source']} > {c['chapter']}\n{c['text']}"
-            for i, c in enumerate(knowledge)
+            f"[{i+1}] 来源：{c['source']} > {c.get('path') or c['chapter']}\n{c['text']}"
+            for i, c in enumerate(all_knowledge)
         )
         system += f"\n\n## 参考资料\n{refs}"
     if notes:
@@ -438,10 +491,15 @@ async def qa_stream(req: QARequest):
             for c in notes
         )
         system += f"\n\n## 我的知识笔记\n{note_refs}"
+    if graph_summary:
+        system += f"\n\n## 图谱关联上下文\n{graph_summary}"
 
     async def _generate():
         # 第一个事件：来源列表
         yield f"data: {json.dumps({'sources': sources_payload}, ensure_ascii=False)}\n\n"
+        # 第二个事件：图谱子图（如有）
+        if graph_viz and graph_viz.get("nodes"):
+            yield f"data: {json.dumps({'graph': graph_viz}, ensure_ascii=False)}\n\n"
 
         if _provider is None:
             yield f"data: {json.dumps({'text': '请配置 LLM_PROVIDER 和 LLM_API_KEY'})}\n\n"
@@ -460,6 +518,94 @@ async def qa_stream(req: QARequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Graph RAG ─────────────────────────────────────────────────────────────────
+
+@app.post("/graph/index")
+async def graph_index(force: bool = False):
+    """启动图索引（后台任务）。force=True 时删除旧图重建。"""
+    import asyncio
+
+    if _provider is None:
+        raise HTTPException(status_code=503, detail="LLM 未配置，图抽取需要 LLM")
+    if not rag.is_available():
+        raise HTTPException(status_code=503, detail="RAG 模块未安装")
+
+    try:
+        import graph_rag as _gr
+    except ImportError:
+        raise HTTPException(status_code=503, detail="graph_rag 模块不可用（缺少 networkx？）")
+
+    if force:
+        # 删除所有旧图文件
+        for f in _gr.GRAPH_DIR.glob("*.graph.json"):
+            f.unlink(missing_ok=True)
+        # 清除 ChromaDB 集合
+        try:
+            client = rag._get_client()
+            for col_name in (_gr._GRAPH_ENTITIES_COL, _gr._GRAPH_RELATIONS_COL):
+                try:
+                    client.delete_collection(col_name)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    async def _run():
+        try:
+            await _gr.index_knowledge_graph(_provider)
+        except Exception as e:
+            print(f"[graph/index] 索引失败: {e}")
+
+    asyncio.create_task(_run())
+    return {"ok": True, "force": force}
+
+
+@app.get("/graph/index-progress")
+async def graph_index_progress():
+    """返回图索引进度，供前端轮询。"""
+    try:
+        import graph_rag as _gr
+        return _gr.get_graph_index_progress()
+    except ImportError:
+        return {"status": "unavailable"}
+
+
+@app.get("/graph/stats")
+async def graph_stats():
+    """返回图谱统计：节点数、边数、向量数。"""
+    try:
+        import graph_rag as _gr
+        return _gr.graph_stats()
+    except ImportError:
+        return {"nodes": 0, "edges": 0, "entity_vectors": 0, "relation_vectors": 0}
+
+
+@app.get("/graph/full")
+def graph_full():
+    """返回全量知识图谱，供前端可视化。"""
+    try:
+        import graph_rag as _gr
+        G = _gr._get_nx_graph()
+        nodes = []
+        for name, attrs in G.nodes(data=True):
+            nodes.append({
+                "id":          name,
+                "entity_type": attrs.get("entity_type", "概念"),
+                "description": attrs.get("description", ""),
+                "source":      attrs.get("source", ""),
+            })
+        edges = []
+        for u, v, data in G.edges(data=True):
+            edges.append({
+                "source":    u,
+                "target":    v,
+                "predicate": data.get("predicate", ""),
+            })
+        return {"nodes": nodes, "edges": edges}
+    except Exception as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
 
 
 # ── 知识笔记 ──────────────────────────────────────────────────────────────────

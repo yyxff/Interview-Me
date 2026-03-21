@@ -14,3 +14,4 @@ beautifulsoup4>=4.12    # HTML 解析（辅助 ebooklib）
 python-multipart>=0.0.9        # 文件上传支持
 sentence-transformers>=2.7.0   # Embedding 模型（首次运行自动下载 ~130MB）
 pdfplumber>=0.11.0             # 简历 PDF 解析
+networkx>=3.0                  # Graph RAG — 内存图 BFS 遍历

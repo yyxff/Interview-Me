@@ -335,6 +335,131 @@ backend/chroma_db_v{版本}_{策略描述}/
 
 ---
 
+---
+
+## 16. 向量数据库：继续使用 ChromaDB，暂不迁移 Qdrant
+
+**选择：** 保持 ChromaDB（内嵌模式）
+
+**考量过 Qdrant 的时机：** Graph RAG 架构讨论时，评估是否应该切换。
+
+**结论：保持 ChromaDB，原因如下：**
+- 当前规模：几本技术书籍，预估 ≤ 5000 chunks。ChromaDB 内嵌模式轻松应对。
+- Qdrant 优势（Named Vectors 多空间、高级 payload 过滤、生产规模）在当前场景无法触发。
+- Qdrant 需要独立进程（Docker），增加本地开发和部署运维成本。
+- Graph RAG 的图存储不依赖向量库（JSON + NetworkX），两者互不干扰。
+
+**迁移 Qdrant 的触发条件：**
+- 向量数 > 100 万（当前规模不会达到）
+- 需要 Sparse + Dense 混合检索（BM25 + 语义）
+- 需要多租户 / 生产部署
+
+---
+
+## 17. Graph RAG 架构：自实现 vs LightRAG
+
+**选择：** 自实现轻量图层，不引入 LightRAG
+
+**为什么考虑 LightRAG？**
+LightRAG 自动从文本抽取 entity + relation（LLM 驱动），支持 local/global/hybrid 三种查询模式，global 模式适合"出几道相关题"这类宏观问法。
+
+**为什么最终选择自实现？**
+
+| 维度 | LightRAG | 自实现 |
+|------|----------|--------|
+| 抽取成本 | 每 chunk 一次 LLM 调用，一本书 500+ 次 | 同等成本，但流程可控 |
+| 中文技术文档效果 | prompt 质量参差，需大量调试 | 可针对性优化 |
+| 代码质量/可维护性 | 开源项目，接入侵入性强 | 完全掌控 |
+| 与现有架构融合 | 需要并行维护两套系统 | 直接集成 |
+| 适配书籍结构 | 通用设计，未针对章节层级 | 可利用 H1/H2/H3 结构 |
+
+**自实现的核心思路（仿 LightRAG）：**
+- Graph chunk → LLM → `(entity, relation, entity)` 三元组
+- 节点：知识实体（"进程调度"、"PCB"、"上下文切换"）
+- 边：关系类型（"包含"、"依赖"、"对比"、"引申"）+ 来源 chunk_id
+- 存储：JSON（节点表 + 边表）+ NetworkX 内存图
+- 查询：BFS/DFS 从命中节点展开 1-2 跳，补充关联上下文
+
+**两种场景的价值：**
+- **学习场景**：命中"进程调度" → 沿边找到"上下文切换 → 内核栈 → PCB"，呈现知识链路
+- **面试场景**：回答完 A → 图中 A 的邻居 = 高频连问候选，面试官追问更自然
+
+---
+
+## 18. 双 RAG 流水线架构
+
+**选择：** Vector RAG + Graph RAG 并行，共享同一份 chunk 语料
+
+**两条流水线：**
+
+```
+同一份原始文本
+       │
+   Chunking（切分）
+       │
+  ┌────┴─────────┐
+  │              │
+  ↓              ↓
+Vector RAG     Graph RAG
+chunk →        chunk →
+LLM 生成       LLM 抽取
+QA 对     →    (entity, relation, entity) →
+embed     →    图存储（JSON + NetworkX）
+ChromaDB
+
+查询时：两路召回 → 结果级 chunk_id 去重 → merge → 送 LLM context
+```
+
+**"去重"发生在哪里？**
+- 两条流水线消费同一文本，产出不同数据结构（向量 vs 图边），**数据层无冲突**。
+- 去重仅发生在**查询结果合并**时：Vector 召回 + Graph 召回可能包含相同 chunk，按 `chunk_id` 过滤掉重复项即可，一行代码解决。
+
+**两种 chunk 大小需求不同（见 Decision 19）：**
+- Vector RAG 需要小 chunk（精确语义匹配）
+- Graph RAG 需要大 chunk（实体关系上下文更完整）
+
+---
+
+## 19. Chunking 策略：双层切分 + Graph 层 Overlap
+
+**当前方案的问题（`_chunk_markdown`，字符数 ≤ 800）：**
+1. 按 `##` 硬性分割，边界处上下文丢失
+2. 用字符数而非 token 数做上限（中文 1 字 ≈ 1.5 token，导致实际 token 量波动大）
+3. 对 Graph RAG 不友好：500 字符的 chunk 里实体关系太稀疏，三元组抽取质量差
+
+**待实施方案：双层 chunk**
+
+| 层级 | 用途 | 大小目标 | Overlap |
+|------|------|---------|---------|
+| Vector chunk | QA 生成 + embed，精确检索 | ~300 token | 无（可选 50 token） |
+| Graph chunk | 实体/关系抽取，构建图 | ~800–1200 token（完整 ## 节） | 相邻 chunk 末尾 ~100 token 首尾重叠 |
+
+**为什么 Vector 层不需要 Overlap？**
+- Overlap 会产生重复向量，增加向量库体积，且对精确问答检索提升有限。
+- 若某句话被切断，生成 QA 时 LLM 会跳过该段落，不会生成错误问题。
+
+**为什么 Graph 层需要 Overlap？**
+- "A 依赖 B"这一关系可能横跨两个 chunk 的边界，没有 overlap 就会被切断，抽取不到这条边。
+- Overlap ~100 token = 一段完整的陈述句，足以覆盖跨段关系。
+
+**Overlap 实现方式：**
+- 切分时记录每个 chunk 的末尾 N token
+- 下一个 chunk 开头拼接上一个 chunk 的末尾 N token
+- Overlap 部分仅用于 LLM 输入，不作为该 chunk 的 `text` 字段存储（避免数据冗余）
+
+**大小度量改为 token 数（tiktoken）：**
+- 用 `tiktoken` 或 `transformers` tokenizer 准确计算 token 数
+- 目标：Vector chunk ≤ 400 token，Graph chunk ≤ 1200 token（留 LLM 处理余量）
+
+**切分依据保持结构优先：**
+- 首先按 `##`（H2）边界分节
+- 节内按段落切分，不打断段落
+- 超长节（> 目标 token）才做段落级滑窗切分
+
+**下一步：** 确定双层 chunk 设计后，重写 `_chunk_markdown()`，两个 pipeline 分别调用不同大小参数的同一函数。
+
+---
+
 ## 后续路线图（骨架 → 生产）
 
 | 阶段 | 升级项 | 影响 |

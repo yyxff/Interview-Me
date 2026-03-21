@@ -362,24 +362,117 @@ def ingest_epub(file_bytes: bytes, name: str) -> Path:
     return md_path
 
 
+# ── 自适应并发信号量（TCP 慢启动 + AIMD）────────────────────────────────────────
+
+class AdaptiveSemaphore:
+    """
+    TCP 风格自适应并发控制：
+    - 慢启动：每完成一整轮（limit 次满载成功）就翻倍，直到 ssthresh
+    - 拥塞避免：超过 ssthresh 后每轮 +1
+    - 失败（限速/超时）：ssthresh = limit//2，limit 降至 ssthresh，切回拥塞避免
+    """
+    MIN = 1
+    MAX = 64
+
+    def __init__(self, initial: int = 1, ssthresh: int = 8):
+        self._limit   = initial
+        self._ssthresh = ssthresh
+        self._active  = 0
+        self._streak  = 0          # 本轮满载成功次数
+        self._cond    = asyncio.Condition()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    async def __aenter__(self):
+        async with self._cond:
+            while self._active >= self._limit:
+                await self._cond.wait()
+            self._active += 1
+        return self
+
+    async def __aexit__(self, exc_type, *_):
+        success = exc_type is None
+        async with self._cond:
+            was_full = self._active >= self._limit
+            self._active -= 1
+            self._adjust(success, was_full)
+            self._cond.notify_all()
+        return False   # 不吞异常
+
+    def _adjust(self, success: bool, was_full: bool) -> None:
+        if not success:
+            new_thresh = max(self.MIN, self._limit // 2)
+            print(f"[adaptive] 失败 → ssthresh={new_thresh}, "
+                  f"并发 {self._limit}→{new_thresh}")
+            self._ssthresh = new_thresh
+            self._limit    = new_thresh
+            self._streak   = 0
+            return
+
+        if not was_full:
+            return   # 没跑满，不计入本轮
+
+        self._streak += 1
+        if self._streak < self._limit:
+            return   # 本轮还没满
+
+        # 完成一整轮，决定是翻倍还是 +1
+        self._streak = 0
+        if self._limit < self._ssthresh:
+            new = min(self.MAX, self._limit * 2)
+            phase = "慢启动×2"
+        else:
+            new = min(self.MAX, self._limit + 1)
+            phase = "线性+1"
+        if new != self._limit:
+            print(f"[adaptive] {phase} → 并发 {self._limit}→{new} "
+                  f"(ssthresh={self._ssthresh})")
+        self._limit = new
+
+    def stats(self) -> dict:
+        return {
+            "limit":    self._limit,
+            "ssthresh": self._ssthresh,
+            "active":   self._active,
+        }
+
+
 # ── LLM 问题生成 ───────────────────────────────────────────────────────────────
 
+LLM_TIMEOUT = 60.0   # 单次 LLM 调用超时秒数
+
+_RATELIMIT_KEYWORDS = ("rate", "quota", "limit", "overload", "capacity", "timeout", "429")
+
+
+def _is_ratelimit(e: Exception) -> bool:
+    msg = str(e).lower()
+    return "429" in str(e) or any(kw in msg for kw in _RATELIMIT_KEYWORDS)
+
+
 async def _generate_questions(chunk_text: str, provider: "LLMProvider", n: int = QA_PER_CHUNK) -> list[str]:
-    """调用 LLM 对 chunk 生成 n 个不同角度的面试问题。"""
+    """调用 LLM 对 chunk 生成 n 个不同角度的面试问题。限速/超时错误向上抛出。"""
     prompt = (
         f"根据以下技术内容，生成{n}个不同角度的面试问题。\n"
         "只输出问题本身，每行一个，不加序号和任何前缀符号。\n\n"
         f"内容：\n{chunk_text[:800]}"
     )
     try:
-        response = await provider.chat(
-            messages=[{"role": "user", "content": prompt}],
-            system="你是一位技术面试题生成助手，根据知识点生成有代表性、不同问法的面试问题。",
+        response = await asyncio.wait_for(
+            provider.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system="你是一位技术面试题生成助手，根据知识点生成有代表性、不同问法的面试问题。",
+            ),
+            timeout=LLM_TIMEOUT,
         )
-        questions = [line.strip() for line in response.strip().split('\n') if line.strip()]
-        return questions[:n]
+        return [line.strip() for line in response.strip().split('\n') if line.strip()][:n]
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"LLM timeout after {LLM_TIMEOUT}s")
     except Exception as e:
-        print(f"[rag] 问题生成失败: {e}")
+        if _is_ratelimit(e):
+            raise   # 向上传播，让自适应信号量记为失败
+        print(f"[rag] 问题生成失败(非限速): {e}")
         return []
 
 
@@ -429,44 +522,91 @@ async def index_knowledge_with_qa(provider: "LLMProvider | None" = None) -> int:
     total_new = 0
 
     try:
-        for md_file, chunks in pending:
-            source = md_file.stem
-            _index_progress["file"] = md_file.name
-            print(f"[rag] 开始索引({mode}): {md_file.name}  ({len(chunks)} chunks)")
+        import json as _json
+        sem = AdaptiveSemaphore(initial=1, ssthresh=8)
 
+        for md_file, chunks in pending:
+            source  = md_file.stem
+            qa_path = md_file.with_suffix(".qa.json")
+            _index_progress["file"] = md_file.name
+
+            # ── 加载 QA 缓存（断点续传）───────────────────────────────────
+            qa_cache: dict[str, list[str]] = {}
+            if qa_path.exists():
+                try:
+                    qa_cache = _json.loads(qa_path.read_text(encoding="utf-8"))
+                    cached = sum(1 for k in qa_cache if k.startswith(source + "_"))
+                    print(f"[rag] 读取 QA 缓存: {qa_path.name}  ({cached}/{len(chunks)} chunks)")
+                except Exception:
+                    qa_cache = {}
+
+            done_ref = [_index_progress["chunks_done"]]
+
+            # ── 阶段1：并发生成 QA（缓存命中则跳过 LLM）────────────────────
+            if provider:
+                print(f"[rag] QA 生成({mode}): {md_file.name}  ({len(chunks)} chunks)")
+
+                async def _gen_one(i: int) -> None:
+                    chunk_id = f"{source}_{i}"
+                    if chunk_id in qa_cache:
+                        # 已缓存：直接更新进度
+                        done_ref[0] += 1
+                        return
+                    chunk_text = chunks[i]["text"]
+                    qs: list[str] = []
+                    try:
+                        async with sem:
+                            qs = await _generate_questions(chunk_text, provider)
+                    except Exception as e:
+                        wait = min(10, 3 + sem.limit)
+                        print(f"[rag] chunk {i} 限速/超时，等待 {wait}s: {e}")
+                        await asyncio.sleep(wait)
+                    qa_cache[chunk_id] = qs
+                    qa_path.write_text(
+                        _json.dumps(qa_cache, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    done_ref[0] += 1
+                    done    = done_ref[0]
+                    elapsed = _time.monotonic() - t_start
+                    eta     = elapsed / done * (total_chunks - done) if done else None
+                    _index_progress.update({
+                        "chunks_done": done,
+                        "elapsed_s":   round(elapsed, 1),
+                        "eta_s":       round(eta, 0) if eta is not None else None,
+                    })
+
+                await asyncio.gather(*[_gen_one(i) for i in range(len(chunks))])
+
+            # ── 阶段2：从 qa_cache 构建向量列表，批量写入 ChromaDB ─────────
             ids: list[str] = []
             documents: list[str] = []
             metadatas: list[dict] = []
-
             for i, chunk in enumerate(chunks):
                 chunk_id   = f"{source}_{i}"
                 chunk_text = chunk["text"]
                 chapter    = chunk.get("chapter", "")
                 path       = chunk.get("path", chapter)
-
-                if provider:
-                    questions = await _generate_questions(chunk_text, provider)
-                else:
-                    questions = []
+                questions  = qa_cache.get(chunk_id, []) if provider else []
 
                 if questions:
                     for j, q in enumerate(questions):
                         ids.append(f"{chunk_id}_q{j}")
-                        documents.append(q)          # embed 问题向量
+                        documents.append(q)
                         metadatas.append({
                             "source":   source,
                             "path":     path,
                             "h1":       chunk.get("h1", ""),
                             "h2":       chunk.get("h2", ""),
                             "h3":       chunk.get("h3", ""),
-                            "chapter":  chapter,     # 向后兼容
+                            "chapter":  chapter,
                             "chunk_id": chunk_id,
                             "question": q,
-                            "text":     chunk_text,  # 原文存 metadata
+                            "text":     chunk_text,
                         })
                 else:
                     ids.append(chunk_id)
-                    documents.append(chunk_text)     # 无 QA 时降级嵌入原文
+                    documents.append(chunk_text)
                     metadatas.append({
                         "source":   source,
                         "path":     path,
@@ -478,22 +618,24 @@ async def index_knowledge_with_qa(provider: "LLMProvider | None" = None) -> int:
                         "text":     chunk_text,
                     })
 
-                # 更新进度
-                done = _index_progress["chunks_done"] + 1
-                elapsed = _time.monotonic() - t_start
-                eta = (elapsed / done * (total_chunks - done)) if done > 0 else None
-                _index_progress.update({
-                    "chunks_done": done,
-                    "elapsed_s":   round(elapsed, 1),
-                    "eta_s":       round(eta, 0) if eta is not None else None,
-                })
-                print(f"[rag]   chunk {done}/{total_chunks}  {source} > {chapter[:30]}")
+                if not provider:
+                    done_ref[0] += 1
+                    done    = done_ref[0]
+                    elapsed = _time.monotonic() - t_start
+                    eta     = elapsed / done * (total_chunks - done) if done else None
+                    _index_progress.update({
+                        "chunks_done": done,
+                        "elapsed_s":   round(elapsed, 1),
+                        "eta_s":       round(eta, 0) if eta is not None else None,
+                    })
+                    print(f"[rag]   chunk {done}/{total_chunks}  {source} > {chapter[:30]}")
 
             if ids:
                 col.add(ids=ids, documents=documents, metadatas=metadatas)
                 _index_progress["vectors_added"] += len(ids)
                 total_new += len(chunks)
-                print(f"[rag] 完成: {md_file.name} → {len(chunks)} chunks, {len(ids)} vectors")
+                print(f"[rag] 完成: {md_file.name} → {len(chunks)} chunks, "
+                      f"{len(ids)} vectors (并发峰值={sem.limit})")
 
         _index_progress["status"] = "done"
     except Exception as e:
@@ -501,6 +643,54 @@ async def index_knowledge_with_qa(provider: "LLMProvider | None" = None) -> int:
         _index_progress.update({"status": "error", "error": str(e)})
 
     return total_new
+
+
+def backfill_qa_cache() -> dict[str, int]:
+    """
+    从 ChromaDB 回填 .qa.json 缓存文件（用于已索引但缺少缓存文件的 source）。
+    不调用 LLM，直接读取 ChromaDB metadata 中的 question 字段。
+    返回 {source: chunk_count} 字典。
+    """
+    import json as _json
+    if not is_available() or not KNOWLEDGE_DIR.exists():
+        return {}
+
+    col     = _get_knowledge_col()
+    results: dict[str, int] = {}
+
+    for md_file in sorted(KNOWLEDGE_DIR.glob("*.md")):
+        source   = md_file.stem
+        qa_path  = md_file.with_suffix(".qa.json")
+        if qa_path.exists():
+            continue   # 已有缓存，跳过
+
+        # 取出该 source 全部向量的 metadata
+        try:
+            data = col.get(where={"source": source}, include=["metadatas"])
+        except Exception:
+            continue
+        if not data["metadatas"]:
+            continue
+
+        # 按 chunk_id 聚合 question
+        qa_cache: dict[str, list[str]] = {}
+        for meta in data["metadatas"]:
+            cid = meta.get("chunk_id", "")
+            q   = meta.get("question", "")
+            if cid and q:
+                qa_cache.setdefault(cid, [])
+                if q not in qa_cache[cid]:
+                    qa_cache[cid].append(q)
+
+        if qa_cache:
+            qa_path.write_text(
+                _json.dumps(qa_cache, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"[rag] 回填 QA 缓存: {qa_path.name}  ({len(qa_cache)} chunks)")
+            results[source] = len(qa_cache)
+
+    return results
 
 
 def index_knowledge() -> int:
@@ -867,3 +1057,12 @@ def notes_count() -> int:
         return _get_notes_col().count()
     except Exception:
         return 0
+
+
+def retrieve_graph(query: str) -> dict:
+    """Graph RAG 查询包装 — 优雅降级，import 失败返回空结果。"""
+    try:
+        import graph_rag
+        return graph_rag.retrieve_graph(query)
+    except Exception:
+        return {"entities": [], "relations": [], "source_chunk_ids": [], "graph_summary": ""}

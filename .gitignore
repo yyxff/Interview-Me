@@ -12,3 +12,5 @@ backend/chroma_db*/
 backend/knowledge/
 # 用户笔记（本地数据）
 backend/notes/
+# 图谱数据（本地生成，可重建）
+backend/graph/

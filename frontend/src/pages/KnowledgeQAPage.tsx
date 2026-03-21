@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
+import ForceGraph3D from '3d-force-graph';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -23,12 +24,47 @@ interface IndexProgress {
   error:         string | null;
 }
 
+interface GraphIndexProgress {
+  status:       'idle' | 'running' | 'done' | 'error' | 'unavailable';
+  source:       string;
+  chunks_done:  number;
+  chunks_total: number;
+  entities:     number;
+  relations:    number;
+  elapsed_s:    number;
+  eta_s:        number | null;
+  concurrency:  number;
+  error:        string | null;
+}
+
 interface Source {
-  source:   string;
-  path?:    string;
-  chapter:  string;
-  chunk_id: string;
-  text:     string;
+  source:     string;
+  path?:      string;
+  chapter:    string;
+  chunk_id:   string;
+  text:       string;
+  via_graph?: boolean;
+}
+
+interface GraphNode {
+  id:               string;
+  entity_type:      string;
+  description:      string;
+  source_chunk_ids: string[];
+  used:             boolean;
+  adjacent:         boolean;
+}
+
+interface GraphEdge {
+  source:    string;
+  target:    string;
+  predicate: string;
+  used:      boolean;
+}
+
+interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
 }
 
 interface QAMessage {
@@ -36,6 +72,7 @@ interface QAMessage {
   role:     'user' | 'assistant';
   content:  string;
   sources?: Source[];
+  graph?:   GraphData;
 }
 
 interface Note {
@@ -62,10 +99,11 @@ function fmtDate(s: string): string {
 // ── Knowledge sidebar (left) ───────────────────────────────────────────────────
 
 function KnowledgeSidebar({ indexedNotes }: { indexedNotes: Note[] }) {
-  const [files, setFiles]         = useState<KnowledgeFile[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [progress, setProgress]   = useState<IndexProgress | null>(null);
+  const [files, setFiles]               = useState<KnowledgeFile[]>([]);
+  const [uploading, setUploading]       = useState(false);
+  const [uploadError, setUploadError]   = useState<string | null>(null);
+  const [progress, setProgress]         = useState<IndexProgress | null>(null);
+  const [graphProgress, setGraphProgress] = useState<GraphIndexProgress | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -79,10 +117,15 @@ function KnowledgeSidebar({ indexedNotes }: { indexedNotes: Note[] }) {
 
   const fetchProgress = async () => {
     try {
-      const res  = await fetch(`${API_BASE}/rag/index-progress`);
-      const data: IndexProgress = await res.json();
-      setProgress(data);
-      if (data.status === 'done' || data.status === 'error') fetchList();
+      const [r1, r2] = await Promise.all([
+        fetch(`${API_BASE}/rag/index-progress`),
+        fetch(`${API_BASE}/graph/index-progress`),
+      ]);
+      const d1: IndexProgress      = await r1.json();
+      const d2: GraphIndexProgress = await r2.json();
+      setProgress(d1);
+      setGraphProgress(d2);
+      if (d1.status === 'done' || d1.status === 'error') fetchList();
     } catch { /* ignore */ }
   };
 
@@ -115,9 +158,12 @@ function KnowledgeSidebar({ indexedNotes }: { indexedNotes: Note[] }) {
     }
   };
 
-  const isIndexing = progress?.status === 'running';
+  const isIndexing      = progress?.status === 'running';
+  const isGraphIndexing = graphProgress?.status === 'running';
   const pct = progress && progress.chunks_total > 0
     ? Math.round(progress.chunks_done / progress.chunks_total * 100) : 0;
+  const graphPct = graphProgress && graphProgress.chunks_total > 0
+    ? Math.round(graphProgress.chunks_done / graphProgress.chunks_total * 100) : 0;
 
   return (
     <aside className="kqa-left">
@@ -133,21 +179,47 @@ function KnowledgeSidebar({ indexedNotes }: { indexedNotes: Note[] }) {
 
       {isIndexing && progress && (
         <div className="index-progress">
+          <div className="index-progress-label">向量索引</div>
           <div className="index-progress-bar">
             <div className="index-progress-fill" style={{ width: `${pct}%` }} />
           </div>
           <div className="index-progress-text">
-            <span>向量化 {progress.chunks_done}/{progress.chunks_total}</span>
+            <span>{progress.chunks_done}/{progress.chunks_total} chunks</span>
             <span>剩余 {fmtSeconds(progress.eta_s)}</span>
           </div>
           <div className="index-progress-file">{progress.file}</div>
         </div>
       )}
       {progress?.status === 'done' && progress.vectors_added > 0 && (
-        <div className="index-done">索引完成，共 {progress.vectors_added} 个向量</div>
+        <div className="index-done">向量索引完成，共 {progress.vectors_added} 个向量</div>
       )}
       {progress?.status === 'error' && (
-        <div className="knowledge-upload-error">索引出错: {progress.error}</div>
+        <div className="knowledge-upload-error">向量索引出错: {progress.error}</div>
+      )}
+
+      {isGraphIndexing && graphProgress && (
+        <div className="index-progress index-progress--graph">
+          <div className="index-progress-label">图谱索引</div>
+          <div className="index-progress-bar">
+            <div className="index-progress-fill index-progress-fill--graph" style={{ width: `${graphPct}%` }} />
+          </div>
+          <div className="index-progress-text">
+            <span>{graphProgress.chunks_done}/{graphProgress.chunks_total} chunks · 并发 {graphProgress.concurrency}</span>
+            <span>剩余 {fmtSeconds(graphProgress.eta_s)}</span>
+          </div>
+          <div className="index-progress-file">
+            {graphProgress.source}
+            {graphProgress.entities > 0 && ` · ${graphProgress.entities} 实体 ${graphProgress.relations} 关系`}
+          </div>
+        </div>
+      )}
+      {graphProgress?.status === 'done' && graphProgress.entities > 0 && (
+        <div className="index-done index-done--graph">
+          图谱索引完成，{graphProgress.entities} 实体 · {graphProgress.relations} 关系
+        </div>
+      )}
+      {graphProgress?.status === 'error' && (
+        <div className="knowledge-upload-error">图谱索引出错: {graphProgress.error}</div>
       )}
       {uploadError && <p className="knowledge-upload-error">{uploadError}</p>}
 
@@ -185,6 +257,390 @@ function KnowledgeSidebar({ indexedNotes }: { indexedNotes: Note[] }) {
   );
 }
 
+// ── Graph visualization ────────────────────────────────────────────────────────
+
+interface SimNode extends GraphNode {
+  x: number; y: number;
+  vx: number; vy: number;
+}
+
+const REPULSION    = 3000;
+const SPRING_LEN   = 120;
+const SPRING_K     = 0.04;
+const DAMPING      = 0.82;
+const GRAVITY      = 0.008;
+const NODE_R       = 18;
+const LABEL_MAX    = 8;  // max chars in node label before truncating
+
+const COLOR_USED     = '#6366f1';
+const COLOR_ADJ      = '#374151';
+const COLOR_USED_TXT = '#e2e8f0';
+const COLOR_ADJ_TXT  = '#9ca3af';
+const COLOR_EDGE_USED= '#6366f1';
+const COLOR_EDGE_ADJ = '#374151';
+const COLOR_BG       = '#0d0d16';
+
+function GraphPanel({ data, sources, onOpen }: {
+  data:    GraphData;
+  sources: Source[];
+  onOpen:  (s: Source) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const simRef    = useRef<SimNode[]>([]);
+  const animRef   = useRef<number>(0);
+  const hoverRef    = useRef<SimNode | null>(null);
+  const [tooltip, setTooltip]   = useState<{x:number;y:number;node:SimNode}|null>(null);
+  const [hovering, setHovering] = useState(false);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || data.nodes.length === 0) return;
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // init positions
+    simRef.current = data.nodes.map((n, i) => ({
+      ...n,
+      x: W / 2 + Math.cos(i / data.nodes.length * Math.PI * 2) * 140,
+      y: H / 2 + Math.sin(i / data.nodes.length * Math.PI * 2) * 140,
+      vx: 0, vy: 0,
+    }));
+
+    const byId = new Map(simRef.current.map(n => [n.id, n]));
+
+    function drawArrow(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number) {
+      const dx = x2 - x1, dy = y2 - y1;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      const ux = dx / len, uy = dy / len;
+      // shorten to node edge
+      const sx = x1 + ux * NODE_R, sy = y1 + uy * NODE_R;
+      const ex = x2 - ux * NODE_R, ey = y2 - uy * NODE_R;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      // arrow head
+      const ax = ex - ux * 8 + uy * 5;
+      const ay = ey - uy * 8 - ux * 5;
+      const bx = ex - ux * 8 - uy * 5;
+      const by = ey - uy * 8 + ux * 5;
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function tick() {
+      const nodes = simRef.current;
+
+      // repulsion
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const dx = nodes[j].x - nodes[i].x;
+          const dy = nodes[j].y - nodes[i].y;
+          const d2 = dx * dx + dy * dy || 1;
+          const d  = Math.sqrt(d2);
+          const f  = REPULSION / d2;
+          nodes[i].vx -= f * dx / d; nodes[i].vy -= f * dy / d;
+          nodes[j].vx += f * dx / d; nodes[j].vy += f * dy / d;
+        }
+      }
+      // spring
+      for (const e of data.edges) {
+        const a = byId.get(e.source), b = byId.get(e.target);
+        if (!a || !b) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d  = Math.sqrt(dx * dx + dy * dy) || 1;
+        const f  = SPRING_K * (d - SPRING_LEN);
+        a.vx += f * dx / d; a.vy += f * dy / d;
+        b.vx -= f * dx / d; b.vy -= f * dy / d;
+      }
+      // gravity + damping + clamp
+      for (const n of nodes) {
+        n.vx += (W / 2 - n.x) * GRAVITY;
+        n.vy += (H / 2 - n.y) * GRAVITY;
+        n.vx *= DAMPING; n.vy *= DAMPING;
+        n.x = Math.max(NODE_R + 2, Math.min(W - NODE_R - 2, n.x + n.vx));
+        n.y = Math.max(NODE_R + 2, Math.min(H - NODE_R - 2, n.y + n.vy));
+      }
+
+      // draw
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d')!;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = COLOR_BG;
+      ctx.fillRect(0, 0, W, H);
+
+      // edges
+      for (const e of data.edges) {
+        const a = byId.get(e.source), b = byId.get(e.target);
+        if (!a || !b) continue;
+        const color = e.used ? COLOR_EDGE_USED : COLOR_EDGE_ADJ;
+        ctx.strokeStyle = color;
+        ctx.fillStyle   = color;
+        ctx.lineWidth   = e.used ? 1.5 : 0.8;
+        ctx.globalAlpha = e.used ? 1 : 0.35;
+        drawArrow(ctx, a.x, a.y, b.x, b.y);
+        // label
+        if (e.used) {
+          const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          ctx.globalAlpha = 0.85;
+          ctx.fillStyle = '#a5b4fc';
+          ctx.font = '9px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(e.predicate, mx, my - 4);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // nodes
+      for (const n of nodes) {
+        const isHov = hoverRef.current?.id === n.id;
+        const fill  = n.used ? COLOR_USED : COLOR_ADJ;
+        const alpha = n.adjacent ? 0.45 : 1;
+        ctx.globalAlpha = isHov ? 1 : alpha;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, isHov ? NODE_R + 3 : NODE_R, 0, Math.PI * 2);
+        ctx.fillStyle = fill;
+        ctx.fill();
+        if (n.used) {
+          ctx.strokeStyle = '#818cf8';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        const label = n.id.length > LABEL_MAX ? n.id.slice(0, LABEL_MAX) + '…' : n.id;
+        ctx.fillStyle = n.used ? COLOR_USED_TXT : COLOR_ADJ_TXT;
+        ctx.font = `${n.used ? 'bold ' : ''}10px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.globalAlpha = isHov ? 1 : alpha;
+        ctx.fillText(label, n.x, n.y);
+        ctx.globalAlpha = 1;
+      }
+
+      animRef.current = requestAnimationFrame(tick);
+    }
+
+    animRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [data]);
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width  / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top)  * scaleY;
+    const found = simRef.current.find(
+      n => Math.hypot(n.x - mx, n.y - my) < NODE_R + 4
+    ) ?? null;
+    hoverRef.current = found;
+    setHovering(!!found);
+    if (found) {
+      setTooltip({ x: e.clientX, y: e.clientY, node: found });
+    } else {
+      setTooltip(null);
+    }
+  };
+
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width  / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top)  * scaleY;
+    const node = simRef.current.find(n => Math.hypot(n.x - mx, n.y - my) < NODE_R + 4);
+    if (!node) return;
+    // 找到该节点关联的第一个 source
+    const chunkIds = node.source_chunk_ids ?? [];
+    const matched = sources.find(s => chunkIds.includes(s.chunk_id));
+    if (matched) onOpen(matched);
+  };
+
+  if (data.nodes.length === 0) return null;
+
+  return (
+    <div className="graph-panel">
+      <div className="graph-panel-header">
+        <span className="graph-panel-title">知识图谱</span>
+        <span className="graph-panel-meta">
+          {data.nodes.filter(n => n.used).length} 命中 · {data.nodes.filter(n => n.adjacent).length} 邻居 · {data.edges.length} 关系
+        </span>
+      </div>
+      <div className="graph-canvas-wrap">
+        <canvas
+          ref={canvasRef}
+          width={700}
+          height={340}
+          className="graph-canvas"
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => { hoverRef.current = null; setHovering(false); setTooltip(null); }}
+          onClick={handleClick}
+          style={{ cursor: hovering ? 'pointer' : 'default' }}
+        />
+        {tooltip && (
+          <div className="graph-tooltip" style={{ left: tooltip.x + 12, top: tooltip.y - 8, position: 'fixed' }}>
+            <div className="graph-tooltip-name">{tooltip.node.id}</div>
+            <div className="graph-tooltip-type">{tooltip.node.entity_type}</div>
+            {tooltip.node.description && (
+              <div className="graph-tooltip-desc">{tooltip.node.description.slice(0, 120)}</div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Full knowledge graph viewer (3D) ──────────────────────────────────────────
+
+interface FullNode {
+  id:          string;
+  entity_type: string;
+  description: string;
+  source:      string;
+  color?:      string;
+}
+interface FullLink {
+  source:    string;
+  target:    string;
+  predicate: string;
+}
+
+function sourceColor(source: string, allSources: string[]): string {
+  const idx = allSources.indexOf(source);
+  const hue = Math.round((idx / (allSources.length || 1)) * 330); // avoid red wraparound
+  return `hsl(${hue},65%,60%)`;
+}
+
+function nodeLabel(n: FullNode): string {
+  return `<div style="background:#1a1a2e;padding:8px 12px;border-radius:6px;font-family:sans-serif;max-width:220px;border:1px solid #374151">
+    <div style="font-weight:600;color:#e5e7eb;font-size:13px">${n.id}</div>
+    <div style="color:#6366f1;font-size:10px;margin-top:2px">${n.entity_type}</div>
+    <div style="color:#6b7280;font-size:10px">${n.source}</div>
+    ${n.description ? `<div style="color:#9ca3af;font-size:11px;margin-top:4px;line-height:1.4">${n.description.slice(0, 120)}</div>` : ''}
+  </div>`;
+}
+
+function FullGraphViewer({ onClose }: { onClose: () => void }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const graphRef     = useRef<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState('');
+  const [legend,  setLegend]  = useState<{source: string; color: string}[]>([]);
+  const [stats,   setStats]   = useState('');
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Mount point outside React's reconciler so ForceGraph3D's DOM
+    // mutations never conflict with React's removeChild calls.
+    const mountEl = document.createElement('div');
+    mountEl.style.cssText = 'width:100%;height:100%;position:absolute;inset:0';
+    container.appendChild(mountEl);
+
+    let destroyed = false;
+
+    // Defer via setTimeout so React Strict Mode's synchronous
+    // cleanup (mount→cleanup→mount) clears the timer before
+    // any WebGL context is created, avoiding context-loss on second mount.
+    const timerId = window.setTimeout(() => {
+      if (destroyed) return;
+
+      fetch(`${API_BASE}/graph/full`)
+        .then(r => r.json())
+        .then((data: { nodes: FullNode[]; edges: FullLink[]; error?: string }) => {
+          if (destroyed) return;
+          if (data.error) { setError(data.error); setLoading(false); return; }
+
+          const allSources = [...new Set(data.nodes.map(n => n.source))].sort();
+          const colorMap: Record<string, string> = {};
+          allSources.forEach(s => { colorMap[s] = sourceColor(s, allSources); });
+
+          setLegend(allSources.map(s => ({ source: s, color: colorMap[s] })));
+          setStats(`${data.nodes.length} 节点 · ${data.edges.length} 关系 · ${allSources.length} 来源`);
+
+          const nodes = data.nodes.map(n => ({ ...n, color: colorMap[n.source] ?? '#6366f1' }));
+          const links = data.edges;
+
+          const Graph = new ForceGraph3D(mountEl)
+            .backgroundColor('#0d0d16')
+            .width(mountEl.clientWidth)
+            .height(mountEl.clientHeight)
+            .nodeColor((n: any) => n.color)
+            .nodeLabel((n: any) => nodeLabel(n))
+            .nodeRelSize(4)
+            .linkColor(() => 'rgba(148,150,255,0.8)')
+            .linkWidth(1.5)
+            .linkLabel((l: any) => l.predicate)
+            .linkDirectionalArrowLength(3)
+            .linkDirectionalArrowRelPos(1)
+            .linkDirectionalParticles(1)
+            .linkDirectionalParticleSpeed(0.004)
+            .onNodeDragEnd((node: any) => {
+              node.fx = node.x;
+              node.fy = node.y;
+              node.fz = node.z;
+            })
+            .graphData({ nodes, links });
+
+          graphRef.current = Graph;
+          setLoading(false);
+
+          const ro = new ResizeObserver(() => {
+            Graph.width(mountEl.clientWidth).height(mountEl.clientHeight);
+          });
+          ro.observe(mountEl);
+          (Graph as any)._ro = ro;
+        })
+        .catch(e => { if (!destroyed) { setError(String(e)); setLoading(false); } });
+    }, 0);
+
+    return () => {
+      destroyed = true;
+      clearTimeout(timerId);
+      (graphRef.current as any)?._ro?.disconnect();
+      graphRef.current?._destructor?.();
+      graphRef.current = null;
+      if (container.contains(mountEl)) container.removeChild(mountEl);
+    };
+  }, []);
+
+  return (
+    <div className="fullgraph-overlay">
+      <div className="fullgraph-header">
+        <span className="fullgraph-title">知识图谱全览</span>
+        {stats && <span className="fullgraph-stats">{stats}</span>}
+        <span className="fullgraph-hint">左键旋转 · 右键平移 · 滚轮缩放 · 节点可拖拽固定</span>
+        <button className="fullgraph-close" onClick={onClose}>✕</button>
+      </div>
+
+      {legend.length > 0 && (
+        <div className="fullgraph-legend">
+          {legend.map(l => (
+            <span key={l.source} className="fullgraph-legend-item">
+              <span className="fullgraph-legend-dot" style={{ background: l.color }} />
+              {l.source}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div ref={containerRef} className="fullgraph-canvas-wrap">
+        {loading && <div className="fullgraph-loading">加载图谱中…</div>}
+        {error   && <div className="fullgraph-error">错误：{error}</div>}
+      </div>
+    </div>
+  );
+}
+
 // ── Source chip ────────────────────────────────────────────────────────────────
 
 function SourceChip({ index, source, onOpen }: {
@@ -195,12 +651,12 @@ function SourceChip({ index, source, onOpen }: {
   const [hovered, setHovered] = useState(false);
   return (
     <span className="qa-source-wrap">
-      <button className="qa-source-chip"
+      <button className={`qa-source-chip${source.via_graph ? ' qa-source-chip--graph' : ''}`}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onClick={() => onOpen(source)}
       >
-        [{index + 1}] {source.path || source.chapter || source.source}
+        [{index + 1}] {source.path || source.chapter || source.source}{source.via_graph ? ' ✦' : ''}
       </button>
       {hovered && (
         <div className="qa-source-tooltip">
@@ -432,14 +888,27 @@ export default function KnowledgeQAPage() {
   const [messages, setMessages]       = useState<QAMessage[]>([]);
   const [input, setInput]             = useState('');
   const [loading, setLoading]         = useState(false);
-  const [viewer, setViewer]           = useState<Source | null>(null);
-  const [summarizing, setSummarizing] = useState(false);
+  const [viewer, setViewer]             = useState<Source | null>(null);
+  const [showFullGraph, setShowFullGraph] = useState(false);
+  const [summarizing, setSummarizing]   = useState(false);
   const [notes, setNotes]             = useState<Note[]>([]);
   const historyRef = useRef<{ role: string; content: string }[]>([]);
-  const bottomRef  = useRef<HTMLDivElement>(null);
+  const bottomRef    = useRef<HTMLDivElement>(null);
+  const messagesRef  = useRef<HTMLDivElement>(null);
+  const atBottomRef  = useRef(true);
 
+  // track whether user is near the bottom
+  const handleScroll = useCallback(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }, []);
+
+  // only auto-scroll when already at bottom
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (atBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   const fetchNotes = useCallback(async () => {
@@ -461,6 +930,8 @@ export default function KnowledgeQAPage() {
     setMessages((prev) => [...prev, userMsg]);
     const aId = `a-${Date.now()}`;
     setMessages((prev) => [...prev, { id: aId, role: 'assistant', content: '', sources: [] }]);
+    // force-scroll to bottom when user submits a new question
+    atBottomRef.current = true;
     setLoading(true);
 
     const history = historyRef.current.slice(-12);
@@ -490,6 +961,8 @@ export default function KnowledgeQAPage() {
             const payload = JSON.parse(data);
             if (payload.sources) {
               setMessages((prev) => prev.map((m) => m.id === aId ? { ...m, sources: payload.sources } : m));
+            } else if (payload.graph) {
+              setMessages((prev) => prev.map((m) => m.id === aId ? { ...m, graph: payload.graph } : m));
             } else if (payload.text) {
               fullText += payload.text;
               setMessages((prev) => prev.map((m) => m.id === aId ? { ...m, content: fullText } : m));
@@ -567,7 +1040,7 @@ export default function KnowledgeQAPage() {
       <KnowledgeSidebar indexedNotes={notes.filter((n) => n.indexed && !n.indexing)} />
 
       <div className="qa-main">
-        <div className="qa-messages">
+        <div className="qa-messages" ref={messagesRef} onScroll={handleScroll}>
           {messages.length === 0 && (
             <div className="qa-empty">
               <p className="qa-empty-title">知识库问答</p>
@@ -583,14 +1056,25 @@ export default function KnowledgeQAPage() {
                   : (msg.content || (loading && msg.role === 'assistant'
                       ? <span className="stream-cursor" /> : null))}
               </div>
-              {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
-                <div className="qa-sources">
-                  <span className="qa-sources-label">参考资料</span>
-                  {msg.sources.map((s, i) => (
-                    <SourceChip key={s.chunk_id} index={i} source={s} onOpen={setViewer} />
-                  ))}
-                </div>
-              )}
+              {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (() => {
+                const listSources  = msg.sources.filter(s => !s.via_graph);
+                const graphSources = msg.sources.filter(s => s.via_graph);
+                return (
+                  <>
+                    {listSources.length > 0 && (
+                      <div className="qa-sources">
+                        <span className="qa-sources-label">参考资料</span>
+                        {listSources.map((s, i) => (
+                          <SourceChip key={s.chunk_id} index={i} source={s} onOpen={setViewer} />
+                        ))}
+                      </div>
+                    )}
+                    {msg.graph && msg.graph.nodes.length > 0 && (
+                      <GraphPanel data={msg.graph} sources={graphSources} onOpen={setViewer} />
+                    )}
+                  </>
+                );
+              })()}
             </div>
           ))}
           <div ref={bottomRef} />
@@ -605,6 +1089,11 @@ export default function KnowledgeQAPage() {
             placeholder="输入问题…"
             disabled={loading}
           />
+          <button
+            className="btn btn--icon"
+            onClick={() => setShowFullGraph(true)}
+            title="查看知识图谱"
+          >⬡</button>
           <button
             className="btn btn--icon"
             onClick={handleSummarize}
@@ -627,6 +1116,7 @@ export default function KnowledgeQAPage() {
       />
 
       {viewer && <SourceModal source={viewer} onClose={() => setViewer(null)} />}
+      {showFullGraph && <FullGraphViewer onClose={() => setShowFullGraph(false)} />}
     </div>
   );
 }
