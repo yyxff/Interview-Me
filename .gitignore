@@ -14,3 +14,7 @@ backend/knowledge/
 backend/notes/
 # 图谱数据（本地生成，可重建）
 backend/graph/
+# 评测日志（本地产物）
+backend/eval_logs/
+# 用户 profile（简历等，本地数据）
+backend/profile/
