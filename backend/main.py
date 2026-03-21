@@ -103,7 +103,7 @@ class AnthropicProvider(LLMProvider):
     async def chat(self, messages: list[dict], system: str) -> str:
         result = await self._client.messages.create(
             model=self._model,
-            max_tokens=1024,
+            max_tokens=4096,
             system=system,
             messages=messages,
         )
@@ -112,7 +112,7 @@ class AnthropicProvider(LLMProvider):
     async def stream_chat(self, messages: list[dict], system: str) -> AsyncIterator[str]:  # type: ignore[override]
         async with self._client.messages.stream(
             model=self._model,
-            max_tokens=1024,
+            max_tokens=4096,
             system=system,
             messages=messages,
         ) as stream:
@@ -137,7 +137,7 @@ class OpenAIProvider(LLMProvider):
         all_messages = [{"role": "system", "content": system}] + messages
         result = await self._client.chat.completions.create(
             model=self._model,
-            max_tokens=1024,
+            max_tokens=4096,
             messages=all_messages,  # type: ignore[arg-type]
         )
         return result.choices[0].message.content or ""
@@ -146,7 +146,7 @@ class OpenAIProvider(LLMProvider):
         all_messages = [{"role": "system", "content": system}] + messages
         stream = await self._client.chat.completions.create(
             model=self._model,
-            max_tokens=1024,
+            max_tokens=4096,
             messages=all_messages,  # type: ignore[arg-type]
             stream=True,
         )
@@ -405,23 +405,26 @@ async def chat_stream(req: ChatRequest):
 @app.post("/qa/stream")
 async def qa_stream(req: QARequest):
     """基于知识库的问答：先发 sources 事件，再流式发 LLM 回复。"""
-    result = rag.retrieve_rich(req.message)
+    result    = rag.retrieve_rich(req.message)
     knowledge = result["knowledge"]
+    notes     = result.get("notes", [])
 
+    # sources 包含知识库和笔记，前端统一展示
+    all_sources = knowledge + notes
     sources_payload = [
         {
             "source":   c["source"],
             "chapter":  c["chapter"],
             "chunk_id": c["chunk_id"],
-            "text":     c["text"],      # 完整原文，供前端预览/展开
+            "text":     c["text"],
         }
-        for c in knowledge
+        for c in all_sources
     ]
 
     messages = [{"role": m.role, "content": m.content} for m in trim_history(req.history)]
     messages.append({"role": "user", "content": req.message})
 
-    # 组装 system prompt（仅含知识库内容，不含简历）
+    # 组装 system prompt
     system = QA_SYSTEM_PROMPT
     if knowledge:
         refs = "\n\n---\n\n".join(
@@ -429,6 +432,12 @@ async def qa_stream(req: QARequest):
             for i, c in enumerate(knowledge)
         )
         system += f"\n\n## 参考资料\n{refs}"
+    if notes:
+        note_refs = "\n\n---\n\n".join(
+            f"笔记《{c['chapter']}》\n{c['text']}"
+            for c in notes
+        )
+        system += f"\n\n## 我的知识笔记\n{note_refs}"
 
     async def _generate():
         # 第一个事件：来源列表
