@@ -633,7 +633,7 @@ import datetime as _dt
 def save_note_file(title: str, content: str, questions: list[str] | None = None) -> tuple[str, str]:
     """
     把笔记写到磁盘，立即返回 (note_id, full_text)。
-    若提供 questions，同时写 note_id.qa.json 供向量化使用。
+    同时写 note_id.meta.json（包含 questions 和 indexed 状态）。
     不做 ChromaDB 索引——由调用方在后台线程执行 index_note()。
     """
     import json as _json
@@ -641,21 +641,47 @@ def save_note_file(title: str, content: str, questions: list[str] | None = None)
     note_id = "note_" + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     text    = f"# {title}\n\n{content}"
     (NOTES_DIR / f"{note_id}.md").write_text(text, encoding="utf-8")
-    if questions:
-        (NOTES_DIR / f"{note_id}.qa.json").write_text(
-            _json.dumps({"questions": questions}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    (NOTES_DIR / f"{note_id}.meta.json").write_text(
+        _json.dumps({"questions": questions or [], "indexed": False}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return note_id, text
+
+
+def _read_meta(note_id: str) -> dict:
+    """读取 .meta.json，兼容旧版 .qa.json + .indexed 格式。"""
+    import json as _json
+    meta_path = NOTES_DIR / f"{note_id}.meta.json"
+    if meta_path.exists():
+        try:
+            return _json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"questions": [], "indexed": False}
+    # 旧格式兼容
+    questions: list[str] = []
+    qa_path = NOTES_DIR / f"{note_id}.qa.json"
+    if qa_path.exists():
+        try:
+            questions = _json.loads(qa_path.read_text(encoding="utf-8")).get("questions", [])
+        except Exception:
+            pass
+    indexed = (NOTES_DIR / f"{note_id}.indexed").exists()
+    return {"questions": questions, "indexed": indexed}
+
+
+def _write_meta(note_id: str, meta: dict) -> None:
+    import json as _json
+    (NOTES_DIR / f"{note_id}.meta.json").write_text(
+        _json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def index_note(note_id: str, title: str, text: str) -> None:
     """
     在 ChromaDB 中索引一条笔记（同步，供后台线程调用）。
-    若存在 .qa.json，则以每个问题为 document 向量化（original text 存 metadata）；
+    若 meta.json 中有 questions，则以每个问题为 document 向量化；
     否则降级为直接向量化原文。
     """
-    import json as _json
     if not is_available():
         return
     try:
@@ -668,11 +694,8 @@ def index_note(note_id: str, title: str, text: str) -> None:
         except Exception:
             pass
 
-        qa_path = NOTES_DIR / f"{note_id}.qa.json"
-        if qa_path.exists():
-            questions = _json.loads(qa_path.read_text(encoding="utf-8")).get("questions", [])
-        else:
-            questions = []
+        meta = _read_meta(note_id)
+        questions = meta.get("questions", [])
 
         if questions:
             col.add(
@@ -692,8 +715,9 @@ def index_note(note_id: str, title: str, text: str) -> None:
                 metadatas=[{"note_id": note_id, "title": title, "text": text}],
             )
             print(f"[rag] 笔记已索引(原文): {note_id}")
-        # 成功后写标记文件，供 list_notes() 读取 indexed 状态
-        (NOTES_DIR / f"{note_id}.indexed").touch()
+        # 更新 meta.json 中的 indexed 状态
+        meta["indexed"] = True
+        _write_meta(note_id, meta)
     except Exception as e:
         print(f"[rag] 笔记索引失败: {e}")
 
@@ -711,7 +735,7 @@ def list_notes() -> list[dict]:
             "title":      title,
             "size":       f.stat().st_size,
             "created_at": f.stem[5:],  # "20240115_103045"
-            "indexed":    (NOTES_DIR / f"{f.stem}.indexed").exists(),
+            "indexed":    _read_meta(f.stem).get("indexed", False),
         })
     return notes
 
@@ -724,25 +748,19 @@ def get_note(note_id: str) -> str | None:
 
 def get_note_questions(note_id: str) -> list[str]:
     """返回笔记对应的问题列表，不存在则返回空列表。"""
-    import json as _json
-    qa_path = NOTES_DIR / f"{note_id}.qa.json"
-    if not qa_path.exists():
-        return []
-    return _json.loads(qa_path.read_text(encoding="utf-8")).get("questions", [])
+    return _read_meta(note_id).get("questions", [])
 
 
 def delete_note(note_id: str) -> bool:
-    """删除笔记文件、qa.json 和向量索引，返回是否成功。"""
+    """删除笔记文件、meta.json 和向量索引，返回是否成功。"""
     path = NOTES_DIR / f"{note_id}.md"
     if not path.exists():
         return False
     path.unlink()
-    qa_path = NOTES_DIR / f"{note_id}.qa.json"
-    if qa_path.exists():
-        qa_path.unlink()
-    indexed_path = NOTES_DIR / f"{note_id}.indexed"
-    if indexed_path.exists():
-        indexed_path.unlink()
+    for suffix in (".meta.json", ".qa.json", ".indexed"):
+        p = NOTES_DIR / f"{note_id}{suffix}"
+        if p.exists():
+            p.unlink()
     if is_available():
         try:
             col = _get_notes_col()

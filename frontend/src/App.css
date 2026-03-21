@@ -856,6 +856,44 @@ body {
   word-break: break-word;
 }
 
+/* Inline citation links */
+.qa-cite-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.qa-cite-link {
+  color: #a5b4fc;
+  font-size: 0.78em;
+  vertical-align: super;
+  background: rgba(99,102,241,0.12);
+  border: 1px solid rgba(99,102,241,0.3);
+  border-radius: 4px;
+  padding: 0 3px;
+  cursor: pointer;
+  font-weight: 600;
+  line-height: 1;
+  transition: background 0.15s;
+}
+.qa-cite-link:hover {
+  background: rgba(99,102,241,0.25);
+}
+
+.qa-cite-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 280px;
+  background: #1a1a2e;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  z-index: 200;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  pointer-events: none;
+}
+
 /* Input bar */
 .qa-input-bar {
   display: flex;

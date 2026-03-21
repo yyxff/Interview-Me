@@ -213,6 +213,59 @@ function SourceChip({ index, source, onOpen }: {
   );
 }
 
+// ── Inline citation ────────────────────────────────────────────────────────────
+
+function InlineCitation({ num, source, onOpen }: {
+  num:    number;
+  source: Source;
+  onOpen: (s: Source) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <span className="qa-cite-wrap">
+      <button
+        className="qa-cite-link"
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onClick={() => onOpen(source)}
+      >
+        [{num}]
+      </button>
+      {hovered && (
+        <div className="qa-cite-tooltip">
+          <div className="qa-source-tooltip-title">{source.source}{source.chapter ? ` › ${source.chapter}` : ''}</div>
+          <div className="qa-source-tooltip-text">
+            {source.text.slice(0, 220)}{source.text.length > 220 ? '…' : ''}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function CitedContent({ content, sources, onOpen }: {
+  content: string;
+  sources: Source[];
+  onOpen:  (s: Source) => void;
+}) {
+  const parts = content.split(/(\[\d+\])/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        const match = part.match(/^\[(\d+)\]$/);
+        if (match) {
+          const idx = parseInt(match[1]) - 1;
+          const source = sources[idx];
+          if (source) {
+            return <InlineCitation key={i} num={idx + 1} source={source} onOpen={onOpen} />;
+          }
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+}
+
 // ── Source viewer modal ────────────────────────────────────────────────────────
 
 function SourceModal({ source, onClose }: { source: Source; onClose: () => void }) {
@@ -524,8 +577,10 @@ export default function KnowledgeQAPage() {
             <div key={msg.id} className={`qa-msg qa-msg--${msg.role}`}>
               <div className="qa-msg-label">{msg.role === 'user' ? '你' : 'AI'}</div>
               <div className="qa-msg-bubble">
-                {msg.content || (loading && msg.role === 'assistant'
-                  ? <span className="stream-cursor" /> : null)}
+                {msg.role === 'assistant' && msg.sources?.length && msg.content
+                  ? <CitedContent content={msg.content} sources={msg.sources} onOpen={setViewer} />
+                  : (msg.content || (loading && msg.role === 'assistant'
+                      ? <span className="stream-cursor" /> : null))}
               </div>
               {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
                 <div className="qa-sources">
