@@ -13,12 +13,19 @@ const SILENCE_TIMEOUT_MS = 800;
 
 interface TaskNode {
   id: string;
-  topic: string;
+  task: string;       // concrete task text
+  task_type: string;
   depth: number;
   status: 'pending' | 'active' | 'done';
   score: number | null;
   feedback: string;
   children: TaskNode[];
+}
+
+interface SMSnapshot {
+  state: string;              // INIT/PLANNING/READY/INTERVIEWING/SCORING/DIRECTING/DONE
+  current_task_id: string | null;
+  last_score: { score: number; feedback: string } | null;
 }
 
 type AgentState = 'idle' | 'running' | 'done';
@@ -49,7 +56,7 @@ function TaskTree({ tasks, currentId }: { tasks: TaskNode[]; currentId: string |
           <span className="im-task-bullet">
             {node.status === 'done' ? (node.score && node.score >= 4 ? '✓' : '·') : isActive ? '▶' : '○'}
           </span>
-          <span className="im-task-topic">{node.topic}</span>
+          <span className="im-task-topic">{node.task}</span>
           {node.score !== null && (
             <span className={`im-task-score im-task-score--${node.score >= 4 ? 'good' : node.score <= 2 ? 'low' : 'mid'}`}>
               {node.score}/5
@@ -156,10 +163,9 @@ export default function InterviewPage() {
   const [error, setError]               = useState<string | null>(null);
 
   // Multi-agent state
-  const [sessionId, setSessionId]         = useState<string | null>(null);
-  const [tasks, setTasks]                 = useState<TaskNode[]>([]);
-  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
-  const [sessionStatus, setSessionStatus] = useState<'active' | 'done'>('active');
+  const [sessionId, setSessionId]   = useState<string | null>(null);
+  const [tasks, setTasks]           = useState<TaskNode[]>([]);
+  const [sm, setSm]                 = useState<SMSnapshot | null>(null);
   const [agentStatus, setAgentStatus]     = useState<AgentStatus>(INITIAL_AGENT_STATUS);
   const [showChat, setShowChat]           = useState(false);
 
@@ -258,21 +264,26 @@ export default function InterviewPage() {
               ));
               setAgentStatus(s => ({ ...s, interviewer: { state: 'running', note: '回复中' } }));
             }
-            if (ev.tasks !== undefined) {
-              setTasks(ev.tasks);
-              setCurrentTaskId(ev.current_task_id ?? null);
-              if (ev.session_status === 'done') {
-                setSessionStatus('done');
+            if (ev.sm !== undefined) {
+              const newSm: SMSnapshot = ev.sm;
+              setSm(newSm);
+              if (ev.tasks) setTasks(ev.tasks);
+              // Derive agent status from SM state
+              if (newSm.state === 'DONE') {
                 setAgentStatus({
-                  director:    { state: 'done', note: '面试完成' },
+                  director:    { state: 'done', note: '面试结束' },
                   scorer:      { state: 'done', note: '评分完成' },
                   interviewer: { state: 'done', note: '面试结束' },
                 });
-              } else {
+              } else if (newSm.state === 'INTERVIEWING') {
+                const scored = newSm.last_score;
                 setAgentStatus(s => ({
                   ...s,
-                  director: { state: 'idle', note: '已更新任务' },
-                  scorer:   { state: 'done', note: '评分完成' },
+                  director: { state: 'idle', note: scored ? '已更新任务路径' : '等待' },
+                  scorer:   scored
+                    ? { state: 'done', note: `${scored.score}/5 · ${scored.feedback.slice(0, 20)}` }
+                    : { state: 'idle', note: '待机' },
+                  interviewer: { state: 'idle', note: '等待回答' },
                 }));
               }
             }
@@ -347,10 +358,10 @@ export default function InterviewPage() {
       setSessionId(data.session_id);
       sessionIdRef.current = data.session_id;
       setTasks(data.tasks);
-      setCurrentTaskId(data.current_task_id);
+      setSm(data.sm);
       setAgentStatus(s => ({
         ...s,
-        director:    { state: 'done',    note: `已规划 ${data.tasks.length} 个话题` },
+        director:    { state: 'done',    note: `已规划 ${data.tasks.length} 个任务` },
         interviewer: { state: 'running', note: '准备开场…' },
       }));
 
@@ -412,7 +423,7 @@ export default function InterviewPage() {
             <SetupOverlay loading={loading} onStart={handleStart} />
           )}
 
-          {isStarted && sessionStatus === 'done' && (
+          {isStarted && sm?.state === 'DONE' && (
             <div className="start-overlay">
               <div className="im-done-card">
                 <div className="im-done-icon">🎉</div>
@@ -423,10 +434,9 @@ export default function InterviewPage() {
                     setIsStarted(false);
                     setState('idle');
                     setSessionId(null);
+                    setSm(null);
                     setTasks([]);
-                    setCurrentTaskId(null);
                     setMessages([]);
-                    setSessionStatus('active');
                     setAgentStatus(INITIAL_AGENT_STATUS);
                   }}>
                   重新开始
@@ -453,10 +463,13 @@ export default function InterviewPage() {
           <div className="im-panel im-panel--grow">
             <div className="im-panel-header">
               <span className="im-panel-title">考察进度</span>
-              {sessionStatus === 'done' && <span className="badge badge--green">已完成</span>}
+              {sm?.state === 'DONE' && <span className="badge badge--green">已完成</span>}
+              {sm && sm.state !== 'DONE' && sm.state !== 'READY' && (
+                <span className="im-sm-badge">{sm.state}</span>
+              )}
             </div>
             <div className="im-panel-body im-panel-body--scroll">
-              <TaskTree tasks={tasks} currentId={currentTaskId} />
+              <TaskTree tasks={tasks} currentId={sm?.current_task_id ?? null} />
             </div>
           </div>
 
@@ -503,7 +516,7 @@ export default function InterviewPage() {
       )}
 
       {/* 底部控制栏 */}
-      {isStarted && sessionStatus === 'active' && (
+      {isStarted && sm?.state !== 'DONE' && (
         <footer className="footer">
           <button className="btn btn--danger btn--lg" onClick={handleStop}>结束面试</button>
         </footer>

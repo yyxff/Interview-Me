@@ -862,11 +862,10 @@ async def notes_delete(note_id: str):
     return {"ok": True}
 
 
-# ── 模拟面试（多 Agent） ──────────────────────────────────────────────────────
+# ── 模拟面试（状态机驱动多 Agent） ────────────────────────────────────────────
 
 import interview_agent as _ia
 
-# 注入 LLM provider（模块加载时 _provider 可能还是 None，/interview/* 路由里会实时注入）
 _ia.set_provider(_provider)
 
 
@@ -877,12 +876,16 @@ class StartInterviewRequest(BaseModel):
 
 class InterviewChatRequest(BaseModel):
     session_id: str
-    message: str = ""   # 空字符串 = 让面试官主动开场
+    message: str = ""   # 空字符串 = 触发面试官开场提问
 
 
 @app.post("/interview/start")
 async def interview_start(req: StartInterviewRequest):
-    """创建面试会话，生成任务树（不触发面试官开场）。"""
+    """
+    创建面试会话：
+      INIT → PLANNING（Director 拆分任务）→ READY → INTERVIEWING（激活第一个任务）
+    返回 session_id + tasks + sm 快照。
+    """
     if _provider is None:
         raise HTTPException(status_code=503, detail="LLM 未配置")
 
@@ -898,14 +901,30 @@ async def interview_start(req: StartInterviewRequest):
     _ia._sessions[session.session_id] = session
 
     try:
-        await _ia.director_initialize(session)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"导演初始化失败: {e}")
+        # INIT → PLANNING
+        session.sm.transition("PLANNING")
+        await _ia.director_plan(session)
+        # director_plan 结束后 SM 处于 READY
 
+        # READY → INTERVIEWING（激活第一个任务）
+        first = _ia._next_pending(session.tasks)
+        if first is None:
+            raise RuntimeError("导演未生成任何任务")
+        first.status = "active"
+        session.sm.current_task_id = first.id
+        session.sm.transition("INTERVIEWING", task_id=first.id)
+
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"面试规划失败: {e}")
+
+    print(
+        f"[interview/start] session={session.session_id} "
+        f"tasks={len(session.tasks)} sm={session.sm.state}"
+    )
     return {
-        "session_id":      session.session_id,
-        "tasks":           _ia.tasks_to_dict(session.tasks),
-        "current_task_id": session.current_task_id,
+        "session_id": session.session_id,
+        "tasks":      _ia.tasks_to_dict(session.tasks),
+        "sm":         session.sm.to_dict(),
     }
 
 
@@ -915,80 +934,66 @@ def interview_session_get(session_id: str):
     if s is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return {
-        "session_id":      s.session_id,
-        "status":          s.status,
-        "tasks":           _ia.tasks_to_dict(s.tasks),
-        "current_task_id": s.current_task_id,
+        "session_id": s.session_id,
+        "sm":         s.sm.to_dict(),
+        "tasks":      _ia.tasks_to_dict(s.tasks),
+        "sm_log":     s.sm.event_log[-20:],
     }
 
 
 @app.post("/interview/chat")
 async def interview_chat(req: InterviewChatRequest):
-    """面试官回复 SSE 流：先流文本，话题结束后发任务树更新事件。"""
+    """
+    SSE 流式面试轮次：
+      1. 面试官 ReAct → 流式输出文本
+      2. 若 topic_ended: Scorer → Director（状态机内部完成）
+      3. 发送 {sm, tasks} 状态更新事件
+    """
     _ia.set_provider(_provider)
 
     s = _ia.get_session(req.session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    if s.status == "done":
+
+    if _provider is None:
+        async def _no_llm():
+            yield f"data: {json.dumps({'text': '请配置 LLM_PROVIDER 和 LLM_API_KEY'})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(_no_llm(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    if s.sm.state == "DONE":
         async def _done():
-            yield f"data: {json.dumps({'text': '面试已结束，感谢您的参与！'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'text': '面试已全部结束，感谢您的参与！'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'sm': s.sm.to_dict(), 'tasks': _ia.tasks_to_dict(s.tasks)}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(_done(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    task = _ia._find_task(s.tasks, s.current_task_id)
-    if task is None:
-        raise HTTPException(status_code=400, detail="No active task")
-
-    if _provider is None:
-        async def _no_provider():
-            yield f"data: {json.dumps({'text': '请配置 LLM_PROVIDER 和 LLM_API_KEY'})}\n\n"
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(_no_provider(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if s.sm.state != "INTERVIEWING":
+        raise HTTPException(
+            status_code=409,
+            detail=f"状态机当前为 {s.sm.state}，只有 INTERVIEWING 状态才能接收消息",
+        )
 
     async def _generate():
-        nonlocal task
-
-        # 记录用户消息到历史
         user_msg = req.message.strip()
-        if user_msg:
-            s.history.append({"role": "user", "content": user_msg})
-
         try:
-            response_text, topic_done = await _ia.interviewer_respond(
-                s, task, user_msg or None
-            )
+            result = await _ia.run_turn(session=s, user_message=user_msg)
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             yield "data: [DONE]\n\n"
             return
 
-        # 记录面试官回复
-        s.history.append({"role": "assistant", "content": response_text})
-
-        # 流式发送回复文本（按词切割，流畅感）
-        words = response_text.split(" ")
+        # 流式发送面试官文本（按词）
+        words = result["response"].split(" ")
         for i, word in enumerate(words):
             chunk = word if i == len(words) - 1 else word + " "
             yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.015)
 
-        # 话题结束 → 评分 + 导演更新
-        if topic_done:
-            try:
-                scorer_result = await _ia.scorer_evaluate(task.topic, s.history[-14:])
-                score    = scorer_result["score"]
-                feedback = scorer_result["feedback"]
-                print(f"[interview] topic='{task.topic}' score={score} feedback={feedback}")
-
-                next_task = await _ia.director_after_score(s, task.id, score, feedback)
-                task = next_task
-
-                yield f"data: {json.dumps({'tasks': _ia.tasks_to_dict(s.tasks), 'current_task_id': s.current_task_id, 'session_status': s.status}, ensure_ascii=False)}\n\n"
-            except Exception as e:
-                print(f"[interview] 评分/导演失败: {e}")
+        # 状态更新事件（无论是否结束话题，都下发最新 sm+tasks）
+        yield f"data: {json.dumps({'sm': result['sm'], 'tasks': result['tasks']}, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
 
