@@ -9,11 +9,11 @@ import { StatusBadge } from '../components/StatusBadge';
 const API_BASE = 'http://localhost:8000';
 const SILENCE_TIMEOUT_MS = 800;
 
-// ── 类型 ──────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface TaskNode {
   id: string;
-  task: string;       // concrete task text
+  task: string;
   task_type: string;
   depth: number;
   status: 'pending' | 'active' | 'done';
@@ -23,7 +23,7 @@ interface TaskNode {
 }
 
 interface SMSnapshot {
-  state: string;              // INIT/PLANNING/READY/INTERVIEWING/SCORING/DIRECTING/DONE
+  state: string;
   current_task_id: string | null;
   last_score: { score: number; feedback: string } | null;
 }
@@ -42,156 +42,234 @@ const INITIAL_AGENT_STATUS: AgentStatus = {
   interviewer: { state: 'idle', note: '等待开始' },
 };
 
-// ── TaskTree ──────────────────────────────────────────────────────────────────
+// SM cycling states (for the loop diagram)
+const SM_CYCLE = ['INTERVIEWING', 'SCORING', 'DIRECTING'] as const;
+const SM_ENTRY = ['INIT', 'PLANNING', 'READY'] as const;
 
-function TaskTree({ tasks, currentId }: { tasks: TaskNode[]; currentId: string | null }) {
-  const renderNode = (node: TaskNode, indent = 0) => {
-    const isActive = node.id === currentId;
+// ── SMPanel ───────────────────────────────────────────────────────────────────
+
+function SMPanel({ sm, agentStatus }: { sm: SMSnapshot | null; agentStatus: AgentStatus }) {
+  const agents = [
+    { key: 'director',    icon: '🎬', label: '导演',   ...agentStatus.director },
+    { key: 'interviewer', icon: '🎙', label: '面试官',  ...agentStatus.interviewer },
+    { key: 'scorer',      icon: '📊', label: '评分员',  ...agentStatus.scorer },
+  ] as const;
+
+  const cur = sm?.state ?? 'INIT';
+  const isDone = cur === 'DONE';
+
+  return (
+    <div className="sm-panel">
+      {/* Header */}
+      <div className="sm-panel-header">
+        <span className="im-panel-title">Agent 状态机</span>
+        <span className={`sm-state-badge sm-state-badge--${isDone ? 'done' : SM_CYCLE.includes(cur as any) ? 'active' : 'idle'}`}>
+          {cur}
+        </span>
+      </div>
+
+      {/* Entry states strip */}
+      <div className="sm-entry-strip">
+        {SM_ENTRY.map((s, i) => (
+          <span key={s} className={`sm-node sm-node--sm ${cur === s ? 'sm-node--cur' : s === 'READY' || s === 'PLANNING' || s === 'INIT' ? (
+            ['PLANNING','READY','INTERVIEWING','SCORING','DIRECTING','DONE'].indexOf(cur) >
+            ['INIT','PLANNING','READY'].indexOf(s) ? 'sm-node--past' : '') : ''}`}>
+            {s}
+            {i < SM_ENTRY.length - 1 && <span className="sm-arrow-small">›</span>}
+          </span>
+        ))}
+        <span className="sm-arrow-small">›</span>
+        <span className={`sm-node sm-node--sm ${SM_CYCLE.includes(cur as any) ? 'sm-node--cur' : ''}`}>
+          循环
+        </span>
+        {isDone && <><span className="sm-arrow-small">›</span><span className="sm-node sm-node--sm sm-node--done">DONE</span></>}
+      </div>
+
+      {/* Cycle loop */}
+      <div className="sm-cycle">
+        {SM_CYCLE.map((s, i) => (
+          <span key={s} className="sm-cycle-item">
+            <span className={`sm-node ${cur === s ? 'sm-node--cur' : ''}`}>{s}</span>
+            {i < SM_CYCLE.length - 1 && <span className="sm-arrow">⟶</span>}
+          </span>
+        ))}
+        <span className="sm-loop-arrow">↩</span>
+      </div>
+
+      {/* Agent rows */}
+      <div className="sm-agents">
+        {agents.map(a => (
+          <div key={a.key} className={`sm-agent-row sm-agent-row--${a.state}`}>
+            <span className="sm-agent-icon">{a.icon}</span>
+            <span className="sm-agent-label">{a.label}</span>
+            <span className="sm-agent-note">{a.note}</span>
+            {a.state === 'running' && <span className="sm-spinner" />}
+          </div>
+        ))}
+      </div>
+
+      {/* Last score */}
+      {sm?.last_score && (
+        <div className="sm-last-score">
+          <span className={`sm-score-num sm-score-num--${sm.last_score.score >= 4 ? 'good' : sm.last_score.score <= 2 ? 'low' : 'mid'}`}>
+            {sm.last_score.score}/5
+          </span>
+          <span className="sm-score-fb">{sm.last_score.feedback}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── InfoPanel (Tasks + Chat tabs) ─────────────────────────────────────────────
+
+function InfoPanel({
+  tasks,
+  sm,
+  messages,
+  interimTranscript,
+  chatBodyRef,
+}: {
+  tasks: TaskNode[];
+  sm: SMSnapshot | null;
+  messages: Message[];
+  interimTranscript: string;
+  chatBodyRef: React.RefObject<HTMLDivElement>;
+}) {
+  const [tab, setTab] = useState<'tasks' | 'chat'>('tasks');
+
+  const renderTask = (node: TaskNode, indent = 0): React.ReactNode => {
+    const isActive = node.id === sm?.current_task_id;
     return (
       <div key={node.id}
-        className={`im-task-node ${isActive ? 'im-task-node--active' : ''} ${node.status === 'done' ? 'im-task-node--done' : ''} ${node.status === 'pending' ? 'im-task-node--pending' : ''}`}
+        className={`info-task ${isActive ? 'info-task--active' : ''} ${node.status === 'done' ? 'info-task--done' : ''} ${node.status === 'pending' ? 'info-task--pending' : ''}`}
         style={{ marginLeft: indent * 14 }}
       >
-        <div className="im-task-node-row">
-          <span className="im-task-bullet">
+        <div className="info-task-row">
+          <span className="info-task-bullet">
             {node.status === 'done' ? (node.score && node.score >= 4 ? '✓' : '·') : isActive ? '▶' : '○'}
           </span>
-          <span className="im-task-topic">{node.task}</span>
+          <span className="info-task-text">{node.task}</span>
           {node.score !== null && (
-            <span className={`im-task-score im-task-score--${node.score >= 4 ? 'good' : node.score <= 2 ? 'low' : 'mid'}`}>
+            <span className={`info-task-score info-task-score--${node.score >= 4 ? 'good' : node.score <= 2 ? 'low' : 'mid'}`}>
               {node.score}/5
             </span>
           )}
         </div>
         {node.feedback && node.status === 'done' && (
-          <div className="im-task-feedback">{node.feedback}</div>
+          <div className="info-task-fb">{node.feedback}</div>
         )}
-        {node.children.map(c => renderNode(c, indent + 1))}
+        {node.children.map(c => renderTask(c, indent + 1))}
       </div>
     );
   };
 
-  if (!tasks.length) return <p className="im-panel-empty">面试开始后显示考察路径</p>;
-  return <>{tasks.map(n => renderNode(n))}</>;
-}
-
-// ── AgentStatusPanel ───────────────────────────────────────────────────────────
-
-function AgentStatusPanel({ status }: { status: AgentStatus }) {
-  const agents = [
-    { key: 'director',    label: '导演',  icon: '🎬', ...status.director },
-    { key: 'interviewer', label: '面试官', icon: '🎙', ...status.interviewer },
-    { key: 'scorer',      label: '评分员', icon: '📊', ...status.scorer },
-  ] as const;
-
   return (
-    <>
-      {agents.map(a => (
-        <div key={a.key} className={`im-agent-row im-agent-row--${a.state}`}>
-          <span className="im-agent-icon">{a.icon}</span>
-          <span className="im-agent-label">{a.label}</span>
-          <span className="im-agent-note">{a.note}</span>
-          {a.state === 'running' && <span className="im-agent-spinner" />}
-        </div>
-      ))}
-    </>
+    <div className="info-panel">
+      {/* Tab bar */}
+      <div className="info-tabs">
+        <button className={`info-tab ${tab === 'tasks' ? 'info-tab--active' : ''}`} onClick={() => setTab('tasks')}>
+          考察进度
+        </button>
+        <button className={`info-tab ${tab === 'chat' ? 'info-tab--active' : ''}`} onClick={() => setTab('chat')}>
+          对话记录
+        </button>
+      </div>
+
+      {/* Tab content */}
+      <div className="info-body">
+        {tab === 'tasks' ? (
+          tasks.length === 0
+            ? <p className="info-empty">面试开始后显示考察路径</p>
+            : <>{tasks.map(n => renderTask(n))}</>
+        ) : (
+          <div className="info-chat" ref={chatBodyRef}>
+            {messages.length === 0
+              ? <p className="info-empty">面试开始后显示对话…</p>
+              : messages.map(m => (
+                <div key={m.id} className={`info-msg info-msg--${m.role}`}>
+                  <span className="info-msg-role">{m.role === 'assistant' ? '面试官' : '我'}</span>
+                  <span className="info-msg-text">{m.content || <span className="thinking">…</span>}</span>
+                </div>
+              ))
+            }
+            {interimTranscript && (
+              <div className="info-msg info-msg--user info-msg--interim">
+                <span className="info-msg-role">我</span>
+                <span className="info-msg-text">{interimTranscript}</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
 // ── SetupOverlay ──────────────────────────────────────────────────────────────
 
-function SetupOverlay({
-  loading,
-  onStart,
-}: {
-  loading: boolean;
-  onStart: (jd: string, direction: string) => void;
-}) {
-  const [jd, setJd]             = useState('');
-  const [direction, setDirection] = useState('');
+function SetupOverlay({ loading, onStart }: { loading: boolean; onStart: (jd: string, dir: string) => void }) {
+  const [jd, setJd]         = useState('');
+  const [dir, setDir]       = useState('');
 
   return (
-    <div className="start-overlay">
+    <div className="interview-overlay">
       <div className="im-setup-card">
         <h3 className="im-setup-title">开始模拟面试</h3>
-        <p className="im-setup-hint">
-          填写岗位信息（可选），AI 导演会根据你的 Profile 规划考察路径
-        </p>
-
+        <p className="im-setup-hint">AI 导演会根据你的 Profile 和 JD 拆分具体考察任务</p>
         <div className="im-setup-field">
           <label>岗位 JD（可选）</label>
-          <textarea
-            placeholder="粘贴岗位描述…"
-            rows={4}
-            value={jd}
-            onChange={e => setJd(e.target.value)}
-            disabled={loading}
-          />
+          <textarea rows={4} placeholder="粘贴岗位描述…" value={jd}
+            onChange={e => setJd(e.target.value)} disabled={loading} />
         </div>
-
         <div className="im-setup-field">
           <label>考察方向（可选）</label>
-          <input
-            type="text"
-            placeholder="例：操作系统 / 系统设计 / 数据库…"
-            value={direction}
-            onChange={e => setDirection(e.target.value)}
-            disabled={loading}
-          />
+          <input type="text" placeholder="例：操作系统 / 系统设计…" value={dir}
+            onChange={e => setDir(e.target.value)} disabled={loading} />
         </div>
-
         <button
           className={`btn btn--primary btn--lg ${loading ? 'btn--disabled' : ''}`}
-          disabled={loading}
-          onClick={() => onStart(jd, direction)}
+          disabled={loading} onClick={() => onStart(jd, dir)}
         >
-          {loading ? '规划面试方案…' : '开始面试'}
+          {loading ? '规划考察任务…' : '开始面试'}
         </button>
       </div>
     </div>
   );
 }
 
-// ── 主页面 ────────────────────────────────────────────────────────────────────
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function InterviewPage() {
-  const [messages, setMessages]         = useState<Message[]>([]);
-  const [state, setState]               = useState<InterviewState>('idle');
+  const [messages, setMessages]               = useState<Message[]>([]);
+  const [state, setState]                     = useState<InterviewState>('idle');
   const [interimTranscript, setInterimTranscript] = useState('');
-  const [isStarted, setIsStarted]       = useState(false);
-  const [loading, setLoading]           = useState(false);
-  const [error, setError]               = useState<string | null>(null);
+  const [isStarted, setIsStarted]             = useState(false);
+  const [loading, setLoading]                 = useState(false);
+  const [error, setError]                     = useState<string | null>(null);
+  const [sessionId, setSessionId]             = useState<string | null>(null);
+  const [tasks, setTasks]                     = useState<TaskNode[]>([]);
+  const [sm, setSm]                           = useState<SMSnapshot | null>(null);
+  const [agentStatus, setAgentStatus]         = useState<AgentStatus>(INITIAL_AGENT_STATUS);
 
-  // Multi-agent state
-  const [sessionId, setSessionId]   = useState<string | null>(null);
-  const [tasks, setTasks]           = useState<TaskNode[]>([]);
-  const [sm, setSm]                 = useState<SMSnapshot | null>(null);
-  const [agentStatus, setAgentStatus]     = useState<AgentStatus>(INITIAL_AGENT_STATUS);
-  const [showChat, setShowChat]           = useState(false);
-
-  const sessionIdRef    = useRef<string | null>(null);
-  const stateRef        = useRef<InterviewState>('idle');
-  const messagesRef     = useRef<Message[]>([]);
-  const accumulatedRef  = useRef('');
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ttsActionsRef   = useRef({ speak: (_: string) => {}, cancel: () => {} });
+  const sessionIdRef  = useRef<string | null>(null);
+  const stateRef      = useRef<InterviewState>('idle');
+  const accumulatedRef   = useRef('');
+  const silenceTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ttsActionsRef    = useRef({ speak: (_: string) => {}, cancel: () => {} });
   const recognitionActionsRef = useRef({ start: () => {}, stop: () => {} });
-  const chatBodyRef     = useRef<HTMLDivElement>(null);
+  const chatBodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { stateRef.current = state; }, [state]);
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
-
-  // Auto-scroll chat
   useEffect(() => {
     chatBodyRef.current?.scrollTo({ top: chatBodyRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
-  // ── TTS ────────────────────────────────────────────────────────────────────
+  // ── TTS ──────────────────────────────────────────────────────────────────────
 
   const { speak, cancel: cancelSpeak } = useTTS({
-    lang: 'zh-CN',
-    rate: 1,
+    lang: 'zh-CN', rate: 1,
     onStart: () => {
       setState('speaking');
       recognitionActionsRef.current.stop();
@@ -205,26 +283,17 @@ export default function InterviewPage() {
       }
     },
   });
+  useEffect(() => { ttsActionsRef.current = { speak, cancel: cancelSpeak }; }, [speak, cancelSpeak]);
 
-  useEffect(() => {
-    ttsActionsRef.current = { speak, cancel: cancelSpeak };
-  }, [speak, cancelSpeak]);
-
-  // ── Submit turn to /interview/chat ─────────────────────────────────────────
+  // ── Submit turn ───────────────────────────────────────────────────────────────
 
   const submitTurn = useCallback(async (text: string) => {
     const sid = sessionIdRef.current;
     if (!sid || stateRef.current === 'processing') return;
-    if (text) accumulatedRef.current = '';
+    accumulatedRef.current = '';
     setInterimTranscript('');
 
-    const userMsg: Message | null = text
-      ? { id: `u-${Date.now()}`, role: 'user', content: text, timestamp: new Date() }
-      : null;
-
-    if (userMsg) {
-      setMessages(prev => [...prev, userMsg]);
-    }
+    if (text) setMessages(prev => [...prev, { id: `u-${Date.now()}`, role: 'user', content: text, timestamp: new Date() }]);
     setState('processing');
     setAgentStatus(s => ({ ...s, interviewer: { state: 'running', note: '思考中' } }));
 
@@ -239,10 +308,9 @@ export default function InterviewPage() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-      const reader  = res.body!.getReader();
+      const reader = res.body!.getReader();
       const decoder = new TextDecoder();
-      let buffer    = '';
-      let fullText  = '';
+      let buffer = '', fullText = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -250,7 +318,6 @@ export default function InterviewPage() {
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
-
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const raw = line.slice(6).trim();
@@ -259,41 +326,31 @@ export default function InterviewPage() {
             const ev = JSON.parse(raw);
             if (ev.text !== undefined) {
               fullText += ev.text;
-              setMessages(prev => prev.map(m =>
-                m.id === assistantId ? { ...m, content: fullText } : m
-              ));
+              setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m));
               setAgentStatus(s => ({ ...s, interviewer: { state: 'running', note: '回复中' } }));
             }
             if (ev.sm !== undefined) {
               const newSm: SMSnapshot = ev.sm;
               setSm(newSm);
               if (ev.tasks) setTasks(ev.tasks);
-              // Derive agent status from SM state
               if (newSm.state === 'DONE') {
                 setAgentStatus({
                   director:    { state: 'done', note: '面试结束' },
                   scorer:      { state: 'done', note: '评分完成' },
                   interviewer: { state: 'done', note: '面试结束' },
                 });
-              } else if (newSm.state === 'INTERVIEWING') {
-                const scored = newSm.last_score;
+              } else if (newSm.state === 'INTERVIEWING' && newSm.last_score) {
                 setAgentStatus(s => ({
                   ...s,
-                  director: { state: 'idle', note: scored ? '已更新任务路径' : '等待' },
-                  scorer:   scored
-                    ? { state: 'done', note: `${scored.score}/5 · ${scored.feedback.slice(0, 20)}` }
-                    : { state: 'idle', note: '待机' },
-                  interviewer: { state: 'idle', note: '等待回答' },
+                  director:  { state: 'idle', note: '已更新任务路径' },
+                  scorer:    { state: 'done', note: `${newSm.last_score!.score}/5 · ${newSm.last_score!.feedback.slice(0,18)}` },
                 }));
               }
             }
             if (ev.error) throw new Error(ev.error);
-          } catch (e: any) {
-            if (e?.message) throw e;
-          }
+          } catch (e: any) { if (e?.message) throw e; }
         }
       }
-
       if (fullText) ttsActionsRef.current.speak(fullText);
       else setState('listening');
     } catch (err: any) {
@@ -303,74 +360,46 @@ export default function InterviewPage() {
     }
   }, []);
 
-  // ── Voice recognition ─────────────────────────────────────────────────────
-
-  const handleSpeechStart = useCallback(() => {
-    if (stateRef.current !== 'processing') setState('listening');
-  }, []);
-
-  const handleInterimResult = useCallback((transcript: string) => {
-    setInterimTranscript(accumulatedRef.current + transcript);
-  }, []);
-
-  const handleFinalResult = useCallback((transcript: string) => {
-    accumulatedRef.current += transcript;
-    setInterimTranscript(accumulatedRef.current);
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    silenceTimerRef.current = setTimeout(() => {
-      const text = accumulatedRef.current.trim();
-      if (text) submitTurn(text);
-    }, SILENCE_TIMEOUT_MS);
-  }, [submitTurn]);
+  // ── Voice ─────────────────────────────────────────────────────────────────────
 
   const { start: startRecognition, stop: stopRecognition } = useSpeechRecognition({
     lang: 'zh-CN',
-    onSpeechStart: handleSpeechStart,
-    onInterimResult: handleInterimResult,
-    onFinalResult: handleFinalResult,
+    onSpeechStart: useCallback(() => { if (stateRef.current !== 'processing') setState('listening'); }, []),
+    onInterimResult: useCallback((t: string) => setInterimTranscript(accumulatedRef.current + t), []),
+    onFinalResult: useCallback((t: string) => {
+      accumulatedRef.current += t;
+      setInterimTranscript(accumulatedRef.current);
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = setTimeout(() => {
+        const txt = accumulatedRef.current.trim();
+        if (txt) submitTurn(txt);
+      }, SILENCE_TIMEOUT_MS);
+    }, [submitTurn]),
     onError: (err) => setError(`语音识别错误: ${err}`),
   });
+  useEffect(() => { recognitionActionsRef.current = { start: startRecognition, stop: stopRecognition }; }, [startRecognition, stopRecognition]);
 
-  useEffect(() => {
-    recognitionActionsRef.current = { start: startRecognition, stop: stopRecognition };
-  }, [startRecognition, stopRecognition]);
-
-  // ── Start interview ────────────────────────────────────────────────────────
+  // ── Start / Stop ──────────────────────────────────────────────────────────────
 
   const handleStart = useCallback(async (jd: string, direction: string) => {
     setError(null);
     setLoading(true);
-    setAgentStatus({
-      director:    { state: 'running', note: '规划考察路径…' },
-      scorer:      { state: 'idle',    note: '待机' },
-      interviewer: { state: 'idle',    note: '等待导演…' },
-    });
-
+    setAgentStatus({ director: { state: 'running', note: '规划考察任务…' }, scorer: { state: 'idle', note: '待机' }, interviewer: { state: 'idle', note: '等待导演…' } });
     try {
       const res = await fetch(`${API_BASE}/interview/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jd, direction }),
       });
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail || `HTTP ${res.status}`); }
       const data = await res.json();
-
       setSessionId(data.session_id);
       sessionIdRef.current = data.session_id;
       setTasks(data.tasks);
       setSm(data.sm);
-      setAgentStatus(s => ({
-        ...s,
-        director:    { state: 'done',    note: `已规划 ${data.tasks.length} 个任务` },
-        interviewer: { state: 'running', note: '准备开场…' },
-      }));
-
+      setAgentStatus(s => ({ ...s, director: { state: 'done', note: `已规划 ${data.tasks.length} 个任务` }, interviewer: { state: 'running', note: '开场中…' } }));
       setIsStarted(true);
       setState('processing');
-
-      // 触发面试官开场
       await submitTurn('');
-
       setState('listening');
       startRecognition();
     } catch (e: any) {
@@ -381,145 +410,82 @@ export default function InterviewPage() {
     }
   }, [submitTurn, startRecognition]);
 
-  // ── Stop interview ─────────────────────────────────────────────────────────
-
   const handleStop = useCallback(() => {
-    setIsStarted(false);
-    setState('idle');
-    stopRecognition();
+    setIsStarted(false); setState('idle'); stopRecognition();
     ttsActionsRef.current.cancel();
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    accumulatedRef.current = '';
-    setInterimTranscript('');
+    accumulatedRef.current = ''; setInterimTranscript('');
   }, [stopRecognition]);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  const handleReset = useCallback(() => {
+    setIsStarted(false); setState('idle'); setSessionId(null);
+    setSm(null); setTasks([]); setMessages([]);
+    setAgentStatus(INITIAL_AGENT_STATUS); setError(null);
+  }, []);
+
+  const isDone = sm?.state === 'DONE';
+
+  // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
     <div className="interview-page">
-      {/* 顶部状态栏 */}
+
+      {/* Top bar */}
       <div className="interview-topbar">
         <StatusBadge state={state} />
         <div className="interview-topbar-actions">
-          <button
-            className={`btn btn--icon ${showChat ? 'btn--active' : ''}`}
-            onClick={() => setShowChat(v => !v)}
-            title="对话记录"
-          >
-            💬
-          </button>
+          {isStarted && !isDone && (
+            <button className="btn btn--danger btn--sm" onClick={handleStop}>结束面试</button>
+          )}
+          {isDone && (
+            <button className="btn btn--ghost btn--sm" onClick={handleReset}>重新开始</button>
+          )}
         </div>
       </div>
 
-      {/* 主内容 */}
-      <div className="interview-content">
+      {/* 2×2 grid */}
+      <div className="interview-grid">
 
-        {/* 视频区（左/主） */}
-        <div className="video-area">
+        {/* ① 面试官 */}
+        <div className="interview-tile interview-tile--interviewer">
           <InterviewerTile state={state} />
-          <UserTile state={state} />
-
-          {!isStarted && (
-            <SetupOverlay loading={loading} onStart={handleStart} />
-          )}
-
-          {isStarted && sm?.state === 'DONE' && (
-            <div className="start-overlay">
-              <div className="im-done-card">
-                <div className="im-done-icon">🎉</div>
-                <h3>面试结束</h3>
-                <p>查看右侧考察进度了解评分详情</p>
-                <button className="btn btn--ghost btn--sm"
-                  onClick={() => {
-                    setIsStarted(false);
-                    setState('idle');
-                    setSessionId(null);
-                    setSm(null);
-                    setTasks([]);
-                    setMessages([]);
-                    setAgentStatus(INITIAL_AGENT_STATUS);
-                  }}>
-                  重新开始
-                </button>
-              </div>
-            </div>
-          )}
         </div>
 
-        {/* 右侧面板 */}
-        <aside className="im-sidebar">
+        {/* ② 我 */}
+        <div className="interview-tile interview-tile--user">
+          <UserTile state={state} />
+        </div>
 
-          {/* Agent 状态 */}
-          <div className="im-panel">
-            <div className="im-panel-header">
-              <span className="im-panel-title">Agent 状态</span>
-            </div>
-            <div className="im-panel-body">
-              <AgentStatusPanel status={agentStatus} />
+        {/* ③ Agent 状态机 */}
+        <div className="interview-tile interview-tile--sm">
+          <SMPanel sm={sm} agentStatus={agentStatus} />
+        </div>
+
+        {/* ④ 后台信息 */}
+        <div className="interview-tile interview-tile--info">
+          <InfoPanel tasks={tasks} sm={sm} messages={messages}
+            interimTranscript={interimTranscript} chatBodyRef={chatBodyRef} />
+        </div>
+
+        {/* Setup / Done overlay (inside grid, covers all 4 tiles) */}
+        {!isStarted && <SetupOverlay loading={loading} onStart={handleStart} />}
+        {isStarted && isDone && (
+          <div className="interview-overlay">
+            <div className="im-done-card">
+              <div className="im-done-icon">🎉</div>
+              <h3>面试结束</h3>
+              <p>查看右下角评分详情</p>
+              <button className="btn btn--ghost btn--sm" onClick={handleReset}>重新开始</button>
             </div>
           </div>
-
-          {/* 考察进度 */}
-          <div className="im-panel im-panel--grow">
-            <div className="im-panel-header">
-              <span className="im-panel-title">考察进度</span>
-              {sm?.state === 'DONE' && <span className="badge badge--green">已完成</span>}
-              {sm && sm.state !== 'DONE' && sm.state !== 'READY' && (
-                <span className="im-sm-badge">{sm.state}</span>
-              )}
-            </div>
-            <div className="im-panel-body im-panel-body--scroll">
-              <TaskTree tasks={tasks} currentId={sm?.current_task_id ?? null} />
-            </div>
-          </div>
-
-          {/* 对话记录（可折叠） */}
-          {showChat && (
-            <div className="im-panel im-panel--grow">
-              <div className="im-panel-header">
-                <span className="im-panel-title">对话记录</span>
-                <button className="btn btn--icon btn--sm" onClick={() => setShowChat(false)}>✕</button>
-              </div>
-              <div className="im-panel-body im-panel-body--scroll im-chat-body" ref={chatBodyRef}>
-                {messages.length === 0
-                  ? <p className="im-panel-empty">面试开始后显示对话…</p>
-                  : messages.map(m => (
-                    <div key={m.id} className={`im-chat-msg im-chat-msg--${m.role}`}>
-                      <span className="im-chat-role">
-                        {m.role === 'assistant' ? '面试官' : '我'}
-                      </span>
-                      <span className="im-chat-text">
-                        {m.content || <span className="thinking">…</span>}
-                      </span>
-                    </div>
-                  ))
-                }
-                {interimTranscript && (
-                  <div className="im-chat-msg im-chat-msg--user im-chat-interim">
-                    <span className="im-chat-role">我</span>
-                    <span className="im-chat-text">{interimTranscript}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-        </aside>
+        )}
       </div>
 
-      {/* 错误提示 */}
       {error && (
         <div className="error-bar">
           <span>{error}</span>
           <button className="btn btn--icon btn--sm" onClick={() => setError(null)}>✕</button>
         </div>
-      )}
-
-      {/* 底部控制栏 */}
-      {isStarted && sm?.state !== 'DONE' && (
-        <footer className="footer">
-          <button className="btn btn--danger btn--lg" onClick={handleStop}>结束面试</button>
-        </footer>
       )}
     </div>
   );
