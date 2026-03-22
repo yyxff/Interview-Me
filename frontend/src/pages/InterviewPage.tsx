@@ -146,24 +146,41 @@ function InfoPanel({
   messages,
   interimTranscript,
   chatBodyRef,
+  resultFile,
 }: {
   tree: ThoughtNode[];
   sm: SMSnapshot | null;
   messages: Message[];
   interimTranscript: string;
   chatBodyRef: React.RefObject<HTMLDivElement>;
+  resultFile: string | null;
 }) {
   const [tab, setTab] = useState<'tree' | 'chat'>('tree');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  const toggleCollapse = (id: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
 
   const renderNode = (node: ThoughtNode, indent = 0): React.ReactNode => {
     const isActiveNode = node.id === sm?.current_node_id || node.id === sm?.current_task_id;
     const isTask = node.node_type === 'task';
+    const hasChildren = node.children.length > 0;
+    const isCollapsed = collapsed.has(node.id);
     return (
       <div key={node.id}
         className={`info-task ${isActiveNode ? 'info-task--active' : ''} ${node.status === 'done' ? 'info-task--done' : ''} ${node.status === 'pending' ? 'info-task--pending' : ''} ${isTask ? 'info-task--task' : 'info-task--question'}`}
         style={{ marginLeft: indent * 14 }}
       >
-        <div className="info-task-row">
+        <div className="info-task-row" onClick={() => hasChildren && toggleCollapse(node.id)}
+          style={{ cursor: hasChildren ? 'pointer' : 'default' }}>
+          <span className="info-task-collapse">
+            {hasChildren ? (isCollapsed ? '▸' : '▾') : ' '}
+          </span>
           <span className="info-task-bullet">
             {isTask
               ? (node.status === 'done' ? '✓' : isActiveNode ? '▶' : '○')
@@ -185,7 +202,7 @@ function InfoPanel({
         {node.feedback && (node.status === 'done' || node.status === 'scored') && (
           <div className="info-task-fb">{node.feedback}</div>
         )}
-        {node.children.map(c => renderNode(c, indent + 1))}
+        {!isCollapsed && node.children.map(c => renderNode(c, indent + 1))}
       </div>
     );
   };
@@ -201,6 +218,14 @@ function InfoPanel({
           对话记录
         </button>
       </div>
+
+      {/* Result download */}
+      {resultFile && (
+        <a className="info-result-link" href={`${API_BASE}/interview/results/${resultFile}`}
+          target="_blank" rel="noreferrer">
+          下载复盘 JSON ↓
+        </a>
+      )}
 
       {/* Tab content */}
       <div className="info-body">
@@ -277,6 +302,7 @@ export default function InterviewPage() {
   const [tree, setTree]                       = useState<ThoughtNode[]>([]);
   const [sm, setSm]                           = useState<SMSnapshot | null>(null);
   const [agentStatus, setAgentStatus]         = useState<AgentStatus>(INITIAL_AGENT_STATUS);
+  const [resultFile, setResultFile]           = useState<string | null>(null);
 
   const sessionIdRef  = useRef<string | null>(null);
   const stateRef      = useRef<InterviewState>('idle');
@@ -365,6 +391,11 @@ export default function InterviewPage() {
                   scorer:      { state: 'done', note: '评分完成' },
                   interviewer: { state: 'done', note: '面试结束' },
                 });
+                // 获取最新保存的结果文件名
+                fetch(`${API_BASE}/interview/results`)
+                  .then(r => r.json())
+                  .then(d => { if (d.results?.length) setResultFile(d.results[0]); })
+                  .catch(() => {});
               } else if (newSm.state === 'ANSWERING' && newSm.last_score) {
                 const ls = newSm.last_score;
                 setAgentStatus(s => ({
@@ -458,7 +489,7 @@ export default function InterviewPage() {
   const handleReset = useCallback(() => {
     setIsStarted(false); setState('idle'); setSessionId(null);
     setSm(null); setTree([]); setMessages([]);
-    setAgentStatus(INITIAL_AGENT_STATUS); setError(null);
+    setAgentStatus(INITIAL_AGENT_STATUS); setError(null); setResultFile(null);
   }, []);
 
   const isDone = sm?.state === 'DONE';
@@ -502,7 +533,8 @@ export default function InterviewPage() {
         {/* ④ 后台信息 */}
         <div className="interview-tile interview-tile--info">
           <InfoPanel tree={tree} sm={sm} messages={messages}
-            interimTranscript={interimTranscript} chatBodyRef={chatBodyRef} />
+            interimTranscript={interimTranscript} chatBodyRef={chatBodyRef}
+            resultFile={resultFile} />
         </div>
 
         {/* Setup / Done overlay (inside grid, covers all 4 tiles) */}

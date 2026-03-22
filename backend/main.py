@@ -917,6 +917,22 @@ async def interview_start(req: StartInterviewRequest):
     }
 
 
+@app.get("/interview/results")
+def interview_results_list():
+    """列出所有已保存的面试结果文件。"""
+    files = sorted(_ia.SESSIONS_DIR.glob("*.json"), reverse=True)
+    return {"results": [f.name for f in files]}
+
+
+@app.get("/interview/results/{filename}")
+def interview_result_get(filename: str):
+    """读取指定面试结果 JSON。"""
+    path = _ia.SESSIONS_DIR / filename
+    if not path.exists() or path.suffix != ".json":
+        raise HTTPException(status_code=404, detail="结果文件不存在")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 @app.get("/interview/session/{session_id}")
 def interview_session_get(session_id: str):
     s = _ia.get_session(session_id)
@@ -968,7 +984,7 @@ async def interview_chat(req: InterviewChatRequest):
     async def _generate():
         user_msg = req.message.strip()
         try:
-            result = await _ia.run_turn(session=s, user_message=user_msg)
+            result = await _ia.run_turn(session=s, user_answer=user_msg)
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             yield "data: [DONE]\n\n"

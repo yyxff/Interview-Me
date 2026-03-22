@@ -2482,6 +2482,16 @@ body {
 .info-task-verdict { font-size: 10px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; }
 .info-task-verdict--continue  { background: rgba(251,191,36,0.15); color: var(--amber); }
 .info-task-verdict--deep_dive { background: rgba(239,68,68,0.15);  color: var(--danger); }
+/* Collapse toggle */
+.info-task-collapse { width: 12px; flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
+/* Result download link */
+.info-result-link {
+  display: block; text-align: center; padding: 6px 12px;
+  font-size: 11px; font-weight: 600; color: var(--primary);
+  background: rgba(99,102,241,0.08); border-bottom: 1px solid var(--border);
+  text-decoration: none; flex-shrink: 0;
+}
+.info-result-link:hover { background: rgba(99,102,241,0.16); }
 
 /* Chat */
 .info-chat {

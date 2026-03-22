@@ -32,7 +32,6 @@ NOTES_DIR     = Path(__file__).parent / "notes"
 _KNOWLEDGE_COL = "knowledge"
 _RESUME_COL    = "resumes"
 _NOTES_COL     = "notes"
-
 # 检索参数
 KNOWLEDGE_TOP_K = 3   # 去重后最多返回几条原文
 RESUME_TOP_K    = 2
@@ -160,6 +159,7 @@ def _get_notes_col():
             _NOTES_COL, embedding_function=_get_ef()
         )
     return _notes_col
+
 
 
 # ── 文本切块 ───────────────────────────────────────────────────────────────────
@@ -1172,3 +1172,38 @@ def retrieve_graph(query: str) -> dict:
         return graph_rag.retrieve_graph(query)
     except Exception:
         return {"entities": [], "relations": [], "source_chunk_ids": [], "graph_summary": ""}
+
+
+# ── Profile（用户简历/自我介绍，全局持久）────────────────────────────────────────
+
+PROFILE_DIR = Path(__file__).parent / "profile"
+PROFILE_DIR.mkdir(exist_ok=True)
+
+
+_PROFILE_FILE = "profile.md"
+
+
+def save_profile(md_text: str) -> None:
+    """保存 MD 格式的 profile 到文件（不建向量索引，全文直接用）。"""
+    if not md_text.strip():
+        raise ValueError("内容不能为空")
+    (PROFILE_DIR / _PROFILE_FILE).write_text(md_text, encoding="utf-8")
+    print(f"[profile] 已保存 {len(md_text)} 字")
+
+
+def get_profile_text() -> str | None:
+    """返回 profile 全文，未上传则返回 None。"""
+    path = PROFILE_DIR / _PROFILE_FILE
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def profile_status() -> dict:
+    """返回 profile 状态。"""
+    path = PROFILE_DIR / _PROFILE_FILE
+    if not path.exists():
+        return {"uploaded": False, "size": 0}
+    text = path.read_text(encoding="utf-8")
+    # 提取 ## 章节标题作为摘要
+    import re
+    sections = re.findall(r'^##\s+(.+)', text, re.MULTILINE)
+    return {"uploaded": True, "size": len(text), "sections": sections}

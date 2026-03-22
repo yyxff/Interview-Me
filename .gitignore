@@ -18,3 +18,4 @@ backend/graph/
 backend/eval_logs/
 # 用户 profile（简历等，本地数据）
 backend/profile/
+resume.md

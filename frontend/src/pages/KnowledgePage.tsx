@@ -9,6 +9,12 @@ interface KnowledgeFile {
   indexed: boolean;
 }
 
+interface ProfileStatus {
+  indexed:  boolean;
+  chunks:   number;
+  sections: string[];
+}
+
 interface IndexProgress {
   status: 'idle' | 'running' | 'done' | 'error';
   file: string;
@@ -34,7 +40,11 @@ export default function KnowledgePage() {
   const [mdContent, setMdContent] = useState('');
   const [loadingContent, setLoadingContent] = useState(false);
   const [progress, setProgress] = useState<IndexProgress | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [profile, setProfile]           = useState<ProfileStatus | null>(null);
+  const [profileUploading, setProfileUploading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const fileInputRef        = useRef<HTMLInputElement>(null);
+  const profileInputRef     = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchList = async () => {
@@ -65,6 +75,36 @@ export default function KnowledgePage() {
   }, []);
 
   useEffect(() => { fetchList(); }, []);
+
+  const fetchProfile = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/profile/status`);
+      setProfile(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { fetchProfile(); }, []);
+
+  const handleProfileUpload = async (file: File) => {
+    if (!file.name.toLowerCase().endsWith('.md')) {
+      setProfileError('只支持 Markdown (.md) 文件');
+      return;
+    }
+    setProfileUploading(true);
+    setProfileError(null);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch(`${API_BASE}/profile/upload`, { method: 'POST', body: form });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail || `HTTP ${res.status}`); }
+      await fetchProfile();
+    } catch (e: any) {
+      setProfileError(e.message ?? '上传失败');
+    } finally {
+      setProfileUploading(false);
+      if (profileInputRef.current) profileInputRef.current.value = '';
+    }
+  };
 
   useEffect(() => {
     if (files.length > 0 && !selected) setSelected(files[0].name);
@@ -165,6 +205,28 @@ export default function KnowledgePage() {
               </span>
             </button>
           ))}
+        </div>
+
+        {/* Profile 区域 */}
+        <div className="profile-section">
+          <div className="profile-section-header">
+            <span className="profile-section-title">个人 Profile</span>
+            <span className={`badge ${profile?.indexed ? 'badge--green' : 'badge--gray'}`}>
+              {profile?.indexed ? `${profile.chunks} 段` : '未上传'}
+            </span>
+            <label className={`btn btn--sm ${profileUploading ? 'btn--disabled' : 'btn--ghost'}`} title="上传 MD 简历">
+              {profileUploading ? '上传中…' : '上传'}
+              <input ref={profileInputRef} type="file" accept=".md" style={{ display: 'none' }}
+                disabled={profileUploading}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleProfileUpload(f); }} />
+            </label>
+          </div>
+          {profileError && <p className="knowledge-upload-error">{profileError}</p>}
+          {profile?.indexed && profile.sections.length > 0 && (
+            <ul className="profile-sections">
+              {profile.sections.map(s => <li key={s}>{s}</li>)}
+            </ul>
+          )}
         </div>
       </aside>
 

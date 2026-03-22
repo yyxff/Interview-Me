@@ -25,7 +25,11 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+SESSIONS_DIR = Path(__file__).parent / "sessions"
+SESSIONS_DIR.mkdir(exist_ok=True)
 
 
 # ── 状态机 ────────────────────────────────────────────────────────────────────
@@ -394,6 +398,25 @@ def _add_question_node(
     return qnode
 
 
+def save_session(session: InterviewSession) -> Path:
+    """将本次面试的思维树 + 历史对话保存为 JSON，返回文件路径。"""
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    path = SESSIONS_DIR / f"{ts}_{session.session_id[:8]}.json"
+    data = {
+        "session_id":   session.session_id,
+        "saved_at":     ts,
+        "jd":           session.jd,
+        "direction":    session.direction,
+        "sm_final":     session.sm.to_dict(),
+        "sm_log":       session.sm.event_log,
+        "tree":         tree_to_dict(session.roots),
+        "history":      session.history,
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[session saved] {path}")
+    return path
+
+
 async def start_interview(session: InterviewSession) -> str:
     """
     INIT → PLANNING → ASKING → ANSWERING。
@@ -466,6 +489,7 @@ async def run_turn(session: InterviewSession, user_answer: str) -> dict:
             qnode.status = "done"
             closing = "非常感谢你的参与，今天的面试到此结束！请稍等查看评分详情。"
             session.history.append({"role": "assistant", "content": closing})
+            save_session(session)
             return {"response": closing, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}
 
         # 下一任务首问
@@ -476,16 +500,11 @@ async def run_turn(session: InterviewSession, user_answer: str) -> dict:
         sm.transition("ANSWERING")
 
     else:
-        # continue: 同层追问（挂在 qnode 的父节点下）
-        # deep_dive: 深挖（挂在 qnode 下）
-        parent = qnode if verdict == "deep_dive" else _find(session.roots, qnode.parent_id)
-        if parent is None:
-            parent = _find(session.roots, sm.current_task_id) or qnode
-
+        # continue/deep_dive：都挂在 qnode 下（子节点），逐层深入
         sm.transition("ASKING")
         q_text = await interviewer_ask(session, parent_node=qnode, verdict=verdict,
                                        score_feedback=score_result["feedback"])
-        new_q = _add_question_node(session, parent, q_text)
+        new_q = _add_question_node(session, qnode, q_text)
         new_q.status = "answering"
         sm.transition("ANSWERING")
 
