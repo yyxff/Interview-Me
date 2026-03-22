@@ -1,6 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 import HomePage from './pages/HomePage';
 import InterviewPage from './pages/InterviewPage';
+import InterviewReviewPage from './pages/InterviewReviewPage';
 import KnowledgeQAPage from './pages/KnowledgeQAPage';
 import './App.css';
 
@@ -22,6 +23,9 @@ export default function App() {
           <NavLink to="/knowledge" className={({ isActive }) => `nav-link${isActive ? ' nav-link--active' : ''}`}>
             知识库 & 问答
           </NavLink>
+          <NavLink to="/review" className={({ isActive }) => `nav-link${isActive ? ' nav-link--active' : ''}`}>
+            面试复盘
+          </NavLink>
         </div>
       </nav>
 
@@ -29,6 +33,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/interview" element={<InterviewPage />} />
+          <Route path="/review" element={<InterviewReviewPage />} />
           <Route path="/knowledge" element={<KnowledgeQAPage />} />
           <Route path="/qa" element={<KnowledgeQAPage />} />
         </Routes>

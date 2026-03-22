@@ -1,0 +1,129 @@
+{
+  "session_id": "cc68d7be-f75f-4905-b181-11dd94d6e70e",
+  "saved_at": "20260321_205720",
+  "jd": "",
+  "direction": "",
+  "sm_final": {
+    "state": "ANSWERING",
+    "current_node_id": "864e5d11-1747-499e-905b-0a7003b46d86",
+    "current_task_id": "5fe4a97a-54fc-407f-912f-dd647798bd29",
+    "last_score": null
+  },
+  "sm_log": [
+    {
+      "from": "INIT",
+      "to": "PLANNING",
+      "ts": 1774141019.868
+    },
+    {
+      "from": "PLANNING",
+      "to": "ASKING",
+      "ts": 1774141029.57
+    },
+    {
+      "from": "ASKING",
+      "to": "ANSWERING",
+      "ts": 1774141031.676
+    }
+  ],
+  "tree": [
+    {
+      "id": "5fe4a97a-54fc-407f-912f-dd647798bd29",
+      "node_type": "task",
+      "text": "介绍你做过最有挑战的项目，重点讲技术难点、你是如何分析和解决的，以及从中学到了什么。",
+      "answer": "",
+      "depth": 0,
+      "status": "active",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "experience",
+      "children": [
+        {
+          "id": "864e5d11-1747-499e-905b-0a7003b46d86",
+          "node_type": "question",
+          "text": "请您谈谈您职业生涯中做过的最有挑战的项目，重点围绕其技术难点、您的分析与解决过程，以及您从中获得了哪些成长和体会。",
+          "answer": "",
+          "depth": 1,
+          "status": "answering",
+          "score": null,
+          "verdict": null,
+          "feedback": "",
+          "task_type": "",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "3b99ae33-4209-4229-86fc-c495c5c1b70b",
+      "node_type": "task",
+      "text": "解释 ACID 特性，并举例说明关系型数据库如何实现这些特性。如果一个系统只需要 BASE 特性，你会如何设计，并讨论其适用场景和局限性？",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "concept",
+      "children": []
+    },
+    {
+      "id": "b3b719e4-aab7-49c5-865a-7b911d3e5970",
+      "node_type": "task",
+      "text": "设计一个高并发的短链接服务（如 Bitly）。请详细说明数据模型、生成算法、存储方案、以及如何处理高并发、高可用性和防刷。",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "design",
+      "children": []
+    },
+    {
+      "id": "72f27ab2-977c-4e67-ab7e-5755797b212d",
+      "node_type": "task",
+      "text": "你的一个线上微服务突然响应变慢，CPU 使用率飙升，日志中出现大量 'Too many open files' 错误。你将如何排查问题？请列出详细的排查步骤、可能的原因以及如何避免此类问题。",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "debug",
+      "children": []
+    },
+    {
+      "id": "ec642b62-58f0-4735-85d0-4a065b185744",
+      "node_type": "task",
+      "text": "请详细解释 RESTful API 的设计原则，并讨论幂等性（Idempotency）在API设计中的重要性及常见的实现方式。举例说明哪些场景需要幂等性。",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "knowledge",
+      "children": []
+    },
+    {
+      "id": "7f107e9c-fc1f-4c41-b8c2-8b0a5ea6c521",
+      "node_type": "task",
+      "text": "在分布式系统中，如何保证数据的一致性（如强一致性、最终一致性）？请结合实际案例讨论不同一致性模型的适用场景、权衡以及你可能遇到的数据不一致问题及解决方案。",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "concept",
+      "children": []
+    }
+  ],
+  "history": [
+    {
+      "role": "assistant",
+      "content": "请您谈谈您职业生涯中做过的最有挑战的项目，重点围绕其技术难点、您的分析与解决过程，以及您从中获得了哪些成长和体会。"
+    }
+  ]
+}

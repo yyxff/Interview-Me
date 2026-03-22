@@ -929,18 +929,46 @@ def interview_session_save(session_id: str):
 
 @app.get("/interview/results")
 def interview_results_list():
-    """列出所有已保存的面试结果文件。"""
+    """列出所有已保存的面试结果（含摘要元数据）。"""
     files = sorted(_ia.SESSIONS_DIR.glob("*.json"), reverse=True)
-    return {"results": [f.name for f in files]}
+    results = []
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            tree = d.get("tree", [])
+            task_count = sum(1 for n in tree if n.get("node_type") == "task")
+            scores = [n["score"] for n in _ia._flat_dict(tree) if n.get("score") is not None]
+            results.append({
+                "filename":   f.name,
+                "saved_at":   d.get("saved_at", ""),
+                "direction":  d.get("direction", ""),
+                "jd_snippet": d.get("jd", "")[:60],
+                "sm_state":   d.get("sm_final", {}).get("state", ""),
+                "task_count": task_count,
+                "avg_score":  round(sum(scores) / len(scores), 1) if scores else None,
+            })
+        except Exception:
+            results.append({"filename": f.name, "saved_at": "", "direction": "", "jd_snippet": "", "sm_state": "", "task_count": 0, "avg_score": None})
+    return {"results": results}
 
 
 @app.get("/interview/results/{filename}")
 def interview_result_get(filename: str):
-    """读取指定面试结果 JSON。"""
+    """读取指定面试结果完整 JSON。"""
     path = _ia.SESSIONS_DIR / filename
     if not path.exists() or path.suffix != ".json":
         raise HTTPException(status_code=404, detail="结果文件不存在")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@app.delete("/interview/results/{filename}")
+def interview_result_delete(filename: str):
+    """删除指定面试结果文件。"""
+    path = _ia.SESSIONS_DIR / filename
+    if not path.exists() or path.suffix != ".json":
+        raise HTTPException(status_code=404, detail="结果文件不存在")
+    path.unlink()
+    return {"ok": True}
 
 
 @app.get("/interview/session/{session_id}")

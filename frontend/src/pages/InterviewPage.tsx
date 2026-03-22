@@ -146,14 +146,14 @@ function InfoPanel({
   messages,
   interimTranscript,
   chatBodyRef,
-  resultFile,
+  savedFilename,
 }: {
   tree: ThoughtNode[];
   sm: SMSnapshot | null;
   messages: Message[];
   interimTranscript: string;
   chatBodyRef: React.RefObject<HTMLDivElement>;
-  resultFile: string | null;
+  savedFilename: string | null;
 }) {
   const [tab, setTab] = useState<'tree' | 'chat'>('tree');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -219,11 +219,10 @@ function InfoPanel({
         </button>
       </div>
 
-      {/* Result download */}
-      {resultFile && (
-        <a className="info-result-link" href={`${API_BASE}/interview/results/${resultFile}`}
-          target="_blank" rel="noreferrer">
-          下载复盘 JSON ↓
+      {/* Saved notice */}
+      {savedFilename && (
+        <a className="info-result-link" href="/review">
+          已保存 · 前往面试复盘 →
         </a>
       )}
 
@@ -549,7 +548,7 @@ export default function InterviewPage() {
         <div className="interview-tile interview-tile--info">
           <InfoPanel tree={tree} sm={sm} messages={messages}
             interimTranscript={interimTranscript} chatBodyRef={chatBodyRef}
-            resultFile={resultFile} />
+            savedFilename={resultFile} />
         </div>
 
         {/* Setup / Done overlay (inside grid, covers all 4 tiles) */}

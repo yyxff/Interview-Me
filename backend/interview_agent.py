@@ -143,6 +143,17 @@ def _next_pending_task(roots: list[ThoughtNode]) -> ThoughtNode | None:
     return None
 
 
+def _flat_dict(nodes: list[dict]) -> list[dict]:
+    """将序列化后的树（list[dict]）展平为列表，供 main.py 统计使用。"""
+    out: list[dict] = []
+    q = list(nodes)
+    while q:
+        n = q.pop(0)
+        out.append(n)
+        q.extend(n.get("children", []))
+    return out
+
+
 def tree_to_dict(nodes: list[ThoughtNode]) -> list[dict]:
     return [
         {
