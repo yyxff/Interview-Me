@@ -2657,8 +2657,21 @@ body {
 .rv-score--mid  { background: rgba(245,158,11,0.15); color: var(--amber); }
 .rv-score--low  { background: rgba(239,68,68,0.15);  color: var(--danger); }
 .rv-verdict { font-size: 10px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; }
-.rv-verdict--continue  { background: rgba(251,191,36,0.15); color: var(--amber); }
-.rv-verdict--deep_dive { background: rgba(239,68,68,0.15);  color: var(--danger); }
+.rv-verdict--deepen   { background: rgba(239,68,68,0.15);  color: var(--danger); }
+.rv-verdict--pivot    { background: rgba(99,102,241,0.15); color: var(--primary); }
+.rv-verdict--back_up  { background: rgba(251,191,36,0.15); color: var(--amber); }
+/* Node annotation lines */
+.rv-node-intent    { margin: 2px 0 3px 31px; font-size: 10px; color: var(--primary); font-style: italic; }
+.rv-node-reasoning { margin: 3px 0 3px 31px; font-size: 10px; color: var(--text-muted); line-height: 1.5; border-left: 2px solid rgba(99,102,241,0.3); padding-left: 6px; }
+.rv-node-director  { margin: 2px 0 3px 31px; font-size: 10px; color: var(--amber); font-style: italic; }
+
+/* InfoPanel intent */
+.info-task-intent { font-size: 10px; color: var(--primary); font-style: italic; margin-left: 26px; line-height: 1.4; }
+
+/* Updated verdict colors for InfoPanel */
+.info-task-verdict--deepen  { background: rgba(239,68,68,0.15);  color: var(--danger); }
+.info-task-verdict--pivot   { background: rgba(99,102,241,0.15); color: var(--primary); }
+.info-task-verdict--back_up { background: rgba(251,191,36,0.15); color: var(--amber); }
 
 /* Chat */
 .rv-chat { display: flex; flex-direction: column; gap: 10px; }

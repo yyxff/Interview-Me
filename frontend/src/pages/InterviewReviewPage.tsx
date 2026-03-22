@@ -15,17 +15,20 @@ interface ResultMeta {
 }
 
 interface ThoughtNode {
-  id:        string;
-  node_type: 'task' | 'question';
-  text:      string;
-  answer:    string;
-  depth:     number;
-  status:    string;
-  score:     number | null;
-  verdict:   string | null;
-  feedback:  string;
-  task_type: string;
-  children:  ThoughtNode[];
+  id:              string;
+  node_type:       'task' | 'question';
+  text:            string;
+  answer:          string;
+  depth:           number;
+  status:          string;
+  score:           number | null;
+  verdict:         string | null;
+  feedback:        string;
+  reasoning:       string;
+  director_note:   string;
+  question_intent: string;
+  task_type:       string;
+  children:        ThoughtNode[];
 }
 
 interface SessionResult {
@@ -90,15 +93,24 @@ function TreeView({ roots }: { roots: ThoughtNode[] }) {
           )}
           {node.verdict && node.verdict !== 'pass' && (
             <span className={`rv-verdict rv-verdict--${node.verdict}`}>
-              {node.verdict === 'deep_dive' ? '深挖' : '追问'}
+              {node.verdict === 'deepen' ? '深挖' : node.verdict === 'pivot' ? '转向' : node.verdict === 'back_up' ? '退层' : node.verdict}
             </span>
           )}
         </div>
+        {node.question_intent && !isTask && (
+          <div className="rv-node-intent">考察：{node.question_intent}</div>
+        )}
         {node.answer && !isTask && (
           <div className="rv-node-answer">{node.answer}</div>
         )}
+        {node.reasoning && (
+          <div className="rv-node-reasoning">{node.reasoning}</div>
+        )}
         {node.feedback && (
           <div className="rv-node-feedback">{node.feedback}</div>
+        )}
+        {node.director_note && node.verdict && (
+          <div className="rv-node-director">导演：{node.verdict} — {node.director_note}</div>
         )}
         {!isCollapsed && node.children.map(c => renderNode(c, indent + 1))}
       </div>

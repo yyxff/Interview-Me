@@ -39,7 +39,7 @@ _TRANSITIONS: dict[str, set[str]] = {
     "PLANNING":   {"ASKING"},
     "ASKING":     {"ANSWERING"},
     "ANSWERING":  {"SCORING"},
-    "SCORING":    {"ASKING", "DIRECTING"},
+    "SCORING":    {"DIRECTING"},          # 总是先交给导演决策
     "DIRECTING":  {"ASKING", "DONE"},
     "DONE":       set(),
 }
@@ -73,18 +73,21 @@ class InterviewSM:
 
 @dataclass
 class ThoughtNode:
-    id:         str
-    node_type:  str          # 'task' | 'question'
-    text:       str          # 任务描述 或 问题文本
-    answer:     str  = ""    # 候选人的回答（question 节点）
-    depth:      int  = 0
-    status:     str  = "pending"   # pending/active/asking/answering/scored/done
-    score:      int | None = None
-    verdict:    str | None = None  # pass/continue/deep_dive
-    feedback:   str  = ""
-    task_type:  str  = ""          # task 节点：experience/knowledge/…
-    children:   list["ThoughtNode"] = field(default_factory=list)
-    parent_id:  str | None = None
+    id:             str
+    node_type:      str          # 'task' | 'question'
+    text:           str          # 任务描述 或 问题文本
+    answer:         str  = ""    # 候选人的回答（question 节点）
+    depth:          int  = 0
+    status:         str  = "pending"   # pending/active/asking/answering/scored/done
+    score:          int | None = None
+    verdict:        str | None = None  # pass/deepen/pivot/back_up (导演决策)
+    feedback:       str  = ""    # 评分员给候选人的简要反馈
+    reasoning:      str  = ""    # 评分员 CoT：逐点分析
+    director_note:  str  = ""    # 导演决策理由
+    question_intent: str = ""    # 面试官出题意图（self-reflection 产物）
+    task_type:      str  = ""    # task 节点：experience/knowledge/…
+    children:       list["ThoughtNode"] = field(default_factory=list)
+    parent_id:      str | None = None
 
 
 # ── Session ───────────────────────────────────────────────────────────────────
@@ -157,17 +160,20 @@ def _flat_dict(nodes: list[dict]) -> list[dict]:
 def tree_to_dict(nodes: list[ThoughtNode]) -> list[dict]:
     return [
         {
-            "id":        n.id,
-            "node_type": n.node_type,
-            "text":      n.text,
-            "answer":    n.answer[:120] if n.answer else "",
-            "depth":     n.depth,
-            "status":    n.status,
-            "score":     n.score,
-            "verdict":   n.verdict,
-            "feedback":  n.feedback,
-            "task_type": n.task_type,
-            "children":  tree_to_dict(n.children),
+            "id":             n.id,
+            "node_type":      n.node_type,
+            "text":           n.text,
+            "answer":         n.answer[:120] if n.answer else "",
+            "depth":          n.depth,
+            "status":         n.status,
+            "score":          n.score,
+            "verdict":        n.verdict,
+            "feedback":       n.feedback,
+            "reasoning":      n.reasoning,
+            "director_note":  n.director_note,
+            "question_intent": n.question_intent,
+            "task_type":      n.task_type,
+            "children":       tree_to_dict(n.children),
         }
         for n in nodes
     ]
@@ -248,55 +254,52 @@ async def director_advance(session: InterviewSession) -> ThoughtNode | None:
 # ── ScorerAgent ───────────────────────────────────────────────────────────────
 
 _SCORER_SYS = """\
-你是面试评分员。根据候选人的回答对当前问题进行评分并给出判定。
+你是面试评分员。你的职责是**客观评分并给出逐点分析**，不做策略决策。
 
-评分（1-5）：
-5=准确完整有深度  4=正确覆盖要点  3=基本正确有遗漏  2=概念模糊  1=不了解
+评分标准（1-5分）：
+5分：准确完整，有深度，能说明原理并举例
+4分：覆盖核心要点，表述清晰，基本无遗漏
+3分：方向正确但有明显遗漏，或表述模糊
+2分：只了解表面概念，细节错误或不知道原理
+1分：答非所问，或完全不了解
 
-判定规则：
-- "pass"    : score≥4，或已充分考察该方向，可推进下一话题
-- "continue": score 2-3，回答方向对但不够深入，换角度追问
-- "deep_dive": score≤2，存在明显知识盲区，需要深挖基础
-
-只输出 JSON（不加代码块）：{"score":3,"verdict":"continue","feedback":"了解概念但未说明原理"}"""
+输出 JSON（不加代码块）：
+{
+  "score": 3,
+  "reasoning": "候选人提到了进程拥有独立地址空间(+1)，提到了PCB(+1)，但对进程和线程的本质区别（共享地址空间 vs 独立地址空间）完全未提及(-1.5)，对调度时机的描述也不够准确(-0.5)，综合得3分",
+  "feedback": "掌握了进程基本定义，但缺少进程与线程的核心区别，以及调度时机的准确描述"
+}"""
 
 _SCORER_USR = """\
-当前考察任务（上下文）：{task_text}
+当前考察任务：{task_text}
 面试官的问题：{question}
-候选人的回答：{answer}
-本轮已追问次数：{follow_up_count}（若已超过3次，优先选 pass 推进）"""
+候选人的回答：{answer}"""
 
 
 async def scorer_evaluate(session: InterviewSession, question_node: ThoughtNode, answer: str) -> dict:
-    """SCORING 阶段：评分并给出判定。"""
+    """SCORING 阶段：CoT 评分，只评分不做决策。"""
     assert session.sm.state == "SCORING"
-    # 找根任务上下文
     task_node = _find(session.roots, session.sm.current_task_id)
     task_text = task_node.text if task_node else "（未知）"
-    # 统计本轮追问次数（当前任务下的问题数）
-    follow_up_count = sum(1 for n in _flat(session.roots)
-                          if n.node_type == "question" and n.status in ("scored", "done")
-                          and _is_under_task(session.roots, n, session.sm.current_task_id))
 
     text = await _llm(
         [{"role": "user", "content": _SCORER_USR.format(
             task_text=task_text,
             question=question_node.text,
-            answer=answer[:600],
-            follow_up_count=follow_up_count,
+            answer=answer[:800],
         )}],
         system=_SCORER_SYS,
     )
-    result = _parse_json(text, default={"score": 3, "verdict": "continue", "feedback": "解析失败"})
-    score   = max(1, min(5, int(result.get("score", 3))))
-    verdict = result.get("verdict", "continue")
-    if verdict not in ("pass", "continue", "deep_dive"):
-        verdict = "continue"
-    return {"score": score, "verdict": verdict, "feedback": result.get("feedback", "")}
+    result   = _parse_json(text, default={"score": 3, "reasoning": "解析失败", "feedback": "解析失败"})
+    score    = max(1, min(5, int(result.get("score", 3))))
+    return {
+        "score":     score,
+        "reasoning": result.get("reasoning", ""),
+        "feedback":  result.get("feedback", ""),
+    }
 
 
 def _is_under_task(roots: list[ThoughtNode], node: ThoughtNode, task_id: str | None) -> bool:
-    """判断 node 是否在 task_id 的子树内。"""
     if task_id is None:
         return False
     for n in _flat(roots):
@@ -305,21 +308,94 @@ def _is_under_task(roots: list[ThoughtNode], node: ThoughtNode, task_id: str | N
     return False
 
 
+# ── DirectorAgent（决策） ──────────────────────────────────────────────────────
+
+_DIRECTOR_DECIDE_SYS = """\
+你是面试导演，负责根据评分结果决定下一步考察策略。
+
+决策选项（四选一）：
+- "deepen"  : 候选人对这道题理解不够，需要继续追问这个具体知识点
+- "pivot"   : 候选人这道题表现尚可，但当前任务还有其他重要角度未考察，换方向提问
+- "back_up" : 追问已经太细或太偏，回到上一层问题的层面换角度
+- "pass"    : 当前任务已充分考察，推进到下一个任务
+
+决策依据：
+- score≤2 且树深度<3：优先 deepen
+- score≥4：优先 pass 或 pivot（看任务覆盖度）
+- 树深度≥3：优先 back_up 或 pass（避免追问太深太细）
+- 当前任务下已问题数≥4：强制 pass
+
+输出 JSON（不加代码块）：
+{
+  "decision": "deepen",
+  "reasoning": "候选人完全不知道内存隔离，这是进程的核心概念，不能跳过",
+  "focus": "重点追问：进程间为什么要隔离内存，是通过什么机制实现的"
+}"""
+
+_DIRECTOR_DECIDE_USR = """\
+当前考察任务：{task_text}
+面试官的问题：{question}
+候选人的回答：{answer}
+评分：{score}/5
+评分分析：{reasoning}
+当前问题在思维树中的深度：{depth}（0=任务根，1=首问，2=一次追问，以此类推）
+本任务已问题数：{question_count}"""
+
+
+async def director_decide(
+    session: InterviewSession,
+    question_node: ThoughtNode,
+    score_result: dict,
+) -> dict:
+    """DIRECTING 阶段：导演根据评分决定下一步策略。"""
+    assert session.sm.state == "DIRECTING"
+    task_node = _find(session.roots, session.sm.current_task_id)
+    task_text = task_node.text if task_node else "（未知）"
+    question_count = sum(
+        1 for n in _flat(session.roots)
+        if n.node_type == "question" and _is_under_task(session.roots, n, session.sm.current_task_id)
+    )
+
+    text = await _llm(
+        [{"role": "user", "content": _DIRECTOR_DECIDE_USR.format(
+            task_text=task_text,
+            question=question_node.text,
+            answer=question_node.answer[:400],
+            score=score_result["score"],
+            reasoning=score_result["reasoning"][:400],
+            depth=question_node.depth,
+            question_count=question_count,
+        )}],
+        system=_DIRECTOR_DECIDE_SYS,
+    )
+    result   = _parse_json(text, default={"decision": "pass", "reasoning": "解析失败", "focus": ""})
+    decision = result.get("decision", "pass")
+    if decision not in ("deepen", "pivot", "back_up", "pass"):
+        decision = "pass"
+    print(f"[director] decision={decision} score={score_result['score']} depth={question_node.depth} tasks_q={question_count}")
+    return {
+        "decision":  decision,
+        "reasoning": result.get("reasoning", ""),
+        "focus":     result.get("focus", ""),
+    }
+
+
 # ── InterviewerAgent ──────────────────────────────────────────────────────────
 
 _INTERVIEWER_SYS = """\
 你是一位专业技术面试官，正在考察候选人。
 
 当前考察任务：{task_text}
-你要问的问题类型：{question_context}
+出题场景：{question_context}
 
 {profile_section}
 规则：
-- 输出一道具体的面试问题，语气自然专业
-- 问题要针对任务/追问场景，不重复之前问过的问题
-- 如果是 deep_dive，聚焦候选人回答中暴露的薄弱点
-- 只输出问题本身，不加任何前缀或解释
-- 问题长度：1-2句话"""
+- 输出 JSON，包含出题意图和问题本身
+- 问题要有针对性，不重复之前问过的问题
+- 语气自然专业，问题长度 1-2 句话
+
+输出 JSON（不加代码块）：
+{{"intent": "考察候选人是否理解进程隔离的底层机制", "question": "进程之间为什么需要隔离内存？操作系统是怎么实现的？"}}"""
 
 _INTERVIEWER_USR_INIT = """\
 这是对话的开始，请提出关于「{task_text}」的第一个问题。
@@ -328,31 +404,44 @@ _INTERVIEWER_USR_INIT = """\
 _INTERVIEWER_USR_FOLLOWUP = """\
 上一个问题：{prev_question}
 候选人的回答：{prev_answer}
-评分员反馈：{feedback}（判定：{verdict}）
-
-请根据判定提出下一个问题：
-- continue: 换角度继续追问同话题
-- deep_dive: 深挖候选人回答中暴露的薄弱点
+导演指示：{director_focus}
 
 参考知识（可选）：{rag_context}"""
+
+_REFLECT_SYS = """\
+你是一位严格的面试质量审核员。检查下面这道面试题是否合格：
+1. 是否真正考察了出题意图中的知识点？
+2. 候选人能否明确理解这道题在问什么？
+3. 是否与出题意图匹配，不过宽也不过窄？
+
+如果合格，原样返回这道题。
+如果不合格，输出改进后的问题。
+只输出最终问题文本，不加任何解释。"""
+
+_REFLECT_USR = """\
+出题意图：{intent}
+生成的问题：{question}"""
 
 
 async def interviewer_ask(
     session: InterviewSession,
     parent_node: ThoughtNode,
-    verdict: str | None = None,
-    score_feedback: str = "",
-) -> str:
-    """ASKING 阶段：生成下一个面试问题，返回问题文本。"""
+    director_focus: str = "",
+    is_first: bool = False,
+) -> tuple[str, str]:
+    """
+    ASKING 阶段：生成面试问题 + self-reflection。
+    返回 (question_text, intent)。
+    """
     assert session.sm.state == "ASKING"
     import rag as _rag
 
     task_node = _find(session.roots, session.sm.current_task_id)
     task_text = task_node.text if task_node else "（未知）"
-
-    # RAG 检索辅助（对 knowledge/concept/design 类型做检索）
-    rag_context = ""
     task_type = task_node.task_type if task_node else "knowledge"
+
+    # RAG 检索（knowledge/concept/design/debug 类型）
+    rag_context = ""
     if task_type in ("knowledge", "concept", "design", "debug"):
         try:
             r = _rag.retrieve_rich(task_text)
@@ -364,17 +453,15 @@ async def interviewer_ask(
 
     profile_section = f"候选人背景：\n{session.profile_text[:800]}\n" if session.profile_text else ""
 
-    if verdict is None:
-        # 首个问题
+    if is_first:
         question_context = f"首问，话题开场（task_type={task_type}）"
         user_msg = _INTERVIEWER_USR_INIT.format(task_text=task_text, rag_context=rag_context or "无")
     else:
-        question_context = "deep_dive（深挖薄弱点）" if verdict == "deep_dive" else "continue（换角度追问）"
+        question_context = f"追问/转向（导演指示：{director_focus or '无'}）"
         user_msg = _INTERVIEWER_USR_FOLLOWUP.format(
             prev_question=parent_node.text,
             prev_answer=parent_node.answer[:300],
-            feedback=score_feedback,
-            verdict=verdict,
+            director_focus=director_focus or "根据上下文自行判断",
             rag_context=rag_context or "无",
         )
 
@@ -383,8 +470,27 @@ async def interviewer_ask(
         question_context=question_context,
         profile_section=profile_section,
     )
-    q_text = await _llm([{"role": "user", "content": user_msg}], system=system)
-    return q_text.strip()
+    raw = await _llm([{"role": "user", "content": user_msg}], system=system)
+    parsed = _parse_json(raw, default={"intent": "", "question": raw.strip()})
+    intent   = parsed.get("intent", "")
+    draft_q  = parsed.get("question", raw.strip()).strip()
+
+    # Self-reflection：审核问题质量
+    if intent and draft_q:
+        try:
+            final_q = await _llm(
+                [{"role": "user", "content": _REFLECT_USR.format(intent=intent, question=draft_q)}],
+                system=_REFLECT_SYS,
+                timeout=20.0,
+            )
+            final_q = final_q.strip()
+        except Exception:
+            final_q = draft_q
+    else:
+        final_q = draft_q
+
+    print(f"[interviewer] intent='{intent[:50]}' draft='{draft_q[:50]}' final='{final_q[:50]}'")
+    return final_q, intent
 
 
 # ── 核心编排 ──────────────────────────────────────────────────────────────────
@@ -393,16 +499,17 @@ def _add_question_node(
     session: InterviewSession,
     parent_node: ThoughtNode,
     question_text: str,
+    intent: str = "",
 ) -> ThoughtNode:
     """在思维树上追加一个问题节点，更新 SM。"""
-    depth = parent_node.depth + 1
     qnode = ThoughtNode(
         id=str(uuid.uuid4()),
         node_type="question",
         text=question_text,
-        depth=depth,
+        depth=parent_node.depth + 1,
         status="asking",
         parent_id=parent_node.id,
+        question_intent=intent,
     )
     parent_node.children.append(qnode)
     session.sm.current_node_id = qnode.id
@@ -445,16 +552,15 @@ async def start_interview(session: InterviewSession) -> str:
     first_task.status = "active"
     sm.current_task_id = first_task.id
 
-    # ASKING: Interviewer 生成第一个问题
+    # ASKING: Interviewer 生成第一个问题（含 self-reflection）
     sm.transition("ASKING")
-    q_text = await interviewer_ask(session, parent_node=first_task, verdict=None)
-    qnode = _add_question_node(session, first_task, q_text)
+    q_text, intent = await interviewer_ask(session, parent_node=first_task, is_first=True)
+    qnode = _add_question_node(session, first_task, q_text, intent=intent)
     qnode.status = "answering"
 
     # ANSWERING: 等待用户
     sm.transition("ANSWERING")
 
-    # 记录到全程历史
     session.history.append({"role": "assistant", "content": q_text})
     print(f"[interview/start] tasks={len(session.roots)} first_q={q_text[:60]}")
     return q_text
@@ -462,13 +568,12 @@ async def start_interview(session: InterviewSession) -> str:
 
 async def run_turn(session: InterviewSession, user_answer: str) -> dict:
     """
-    ANSWERING → SCORING → (ASKING | DIRECTING) → ANSWERING。
+    ANSWERING → SCORING → DIRECTING → ASKING → ANSWERING。
     返回 {response, sm, tree}。
     """
     sm = session.sm
     assert sm.state == "ANSWERING", f"期望 ANSWERING，当前 {sm.state}"
 
-    # 找当前问题节点
     qnode = _find(session.roots, sm.current_node_id)
     if qnode is None:
         raise RuntimeError("current_node_id 指向不存在的节点")
@@ -478,23 +583,27 @@ async def run_turn(session: InterviewSession, user_answer: str) -> dict:
     qnode.status = "answered"
     session.history.append({"role": "user", "content": user_answer})
 
-    # SCORING
+    # ── SCORING：评分员 CoT 评分 ──────────────────────────────────────────────
     sm.transition("SCORING")
     score_result = await scorer_evaluate(session, qnode, user_answer)
-    qnode.score   = score_result["score"]
-    qnode.verdict = score_result["verdict"]
-    qnode.feedback = score_result["feedback"]
-    qnode.status  = "scored"
-    sm.last_score = score_result
-    print(f"[scorer] q='{qnode.text[:40]}' score={score_result['score']} verdict={score_result['verdict']}")
+    qnode.score     = score_result["score"]
+    qnode.reasoning = score_result["reasoning"]
+    qnode.feedback  = score_result["feedback"]
+    qnode.status    = "scored"
+    sm.last_score   = score_result
+    print(f"[scorer] q='{qnode.text[:40]}' score={score_result['score']}")
 
-    verdict = score_result["verdict"]
+    # ── DIRECTING：导演决策 ────────────────────────────────────────────────────
+    sm.transition("DIRECTING")
+    director_result = await director_decide(session, qnode, score_result)
+    decision        = director_result["decision"]
+    qnode.verdict        = decision
+    qnode.director_note  = director_result["reasoning"]
 
-    if verdict == "pass":
-        # 当前任务通过 → Director 推进
-        sm.transition("DIRECTING")
+    task_node = _find(session.roots, sm.current_task_id)
+
+    if decision == "pass":
         next_task = await director_advance(session)
-
         if next_task is None:
             sm.transition("DONE")
             qnode.status = "done"
@@ -502,24 +611,45 @@ async def run_turn(session: InterviewSession, user_answer: str) -> dict:
             session.history.append({"role": "assistant", "content": closing})
             save_session(session)
             return {"response": closing, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}
-
         # 下一任务首问
         sm.transition("ASKING")
-        q_text = await interviewer_ask(session, parent_node=next_task, verdict=None)
-        new_q = _add_question_node(session, next_task, q_text)
-        new_q.status = "answering"
-        sm.transition("ANSWERING")
+        q_text, intent = await interviewer_ask(
+            session, parent_node=next_task, is_first=True,
+        )
+        new_q = _add_question_node(session, next_task, q_text, intent=intent)
 
-    else:
-        # continue/deep_dive：都挂在 qnode 下（子节点），逐层深入
+    elif decision == "pivot":
+        # 换角度：挂在任务根节点下（与首问同层）
+        parent = task_node or qnode
         sm.transition("ASKING")
-        q_text = await interviewer_ask(session, parent_node=qnode, verdict=verdict,
-                                       score_feedback=score_result["feedback"])
-        new_q = _add_question_node(session, qnode, q_text)
-        new_q.status = "answering"
-        sm.transition("ANSWERING")
+        q_text, intent = await interviewer_ask(
+            session, parent_node=qnode, director_focus=director_result["focus"],
+        )
+        new_q = _add_question_node(session, parent, q_text, intent=intent)
+
+    elif decision == "back_up":
+        # 回到上一层：挂在 qnode 父节点的父节点下
+        grandparent = _find(session.roots, qnode.parent_id)
+        if grandparent and grandparent.parent_id:
+            grandparent = _find(session.roots, grandparent.parent_id)
+        parent = grandparent or task_node or qnode
+        sm.transition("ASKING")
+        q_text, intent = await interviewer_ask(
+            session, parent_node=qnode, director_focus=director_result["focus"],
+        )
+        new_q = _add_question_node(session, parent, q_text, intent=intent)
+
+    else:  # deepen
+        sm.transition("ASKING")
+        q_text, intent = await interviewer_ask(
+            session, parent_node=qnode, director_focus=director_result["focus"],
+        )
+        new_q = _add_question_node(session, qnode, q_text, intent=intent)
+
+    new_q.status = "answering"
+    sm.transition("ANSWERING")
 
     qnode.status = "done"
     session.history.append({"role": "assistant", "content": q_text})
-    print(f"[interviewer] next_q='{q_text[:60]}'")
+    print(f"[interviewer] decision={decision} next_q='{q_text[:60]}'")
     return {"response": q_text, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}

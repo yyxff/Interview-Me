@@ -1,0 +1,116 @@
+{
+  "session_id": "34644207-20fe-47ea-91c1-61071be8a2f8",
+  "saved_at": "20260321_210254",
+  "jd": "",
+  "direction": "",
+  "sm_final": {
+    "state": "ANSWERING",
+    "current_node_id": "2e1be57d-4675-4619-af80-f860278d331a",
+    "current_task_id": "66271b82-a372-4b19-9b80-9c55b5c9a8d3",
+    "last_score": null
+  },
+  "sm_log": [
+    {
+      "from": "INIT",
+      "to": "PLANNING",
+      "ts": 1774141359.35
+    },
+    {
+      "from": "PLANNING",
+      "to": "ASKING",
+      "ts": 1774141367.397
+    },
+    {
+      "from": "ASKING",
+      "to": "ANSWERING",
+      "ts": 1774141370.139
+    }
+  ],
+  "tree": [
+    {
+      "id": "66271b82-a372-4b19-9b80-9c55b5c9a8d3",
+      "node_type": "task",
+      "text": "请介绍你做过的最有挑战性的项目，并详细说明你在此项目中的角色、所遇到的技术难点以及你是如何解决这些难点的。请聚焦于你在技术决策和实现上的贡献。",
+      "answer": "",
+      "depth": 0,
+      "status": "active",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "experience",
+      "children": [
+        {
+          "id": "2e1be57d-4675-4619-af80-f860278d331a",
+          "node_type": "question",
+          "text": "请你介绍一个你做过的最有挑战性的项目，详细说明你在其中的角色、遇到的技术难点，以及你是如何通过技术决策和实现来解决这些难点的。",
+          "answer": "",
+          "depth": 1,
+          "status": "answering",
+          "score": null,
+          "verdict": null,
+          "feedback": "",
+          "task_type": "",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "7a1c00e5-34a9-4c54-96cf-feb27ad5a488",
+      "node_type": "task",
+      "text": "请解释TCP三次握手和四次挥手的过程，为什么要三次握手而不是两次？为什么是四次挥手而不是三次？在实际应用中，如果TCP连接建立后，一方突然断电会发生什么？",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "concept",
+      "children": []
+    },
+    {
+      "id": "9c34c626-1f3d-45b3-a0e9-6833fba2f64c",
+      "node_type": "task",
+      "text": "给定一个包含 n 个整数的数组 `nums`，判断 `nums` 中是否存在三个元素 a，b，c ，使得 a + b + c = 0 ？请找出所有和为 0 且不重复的三元组。请写出最优解代码，并分析其时间复杂度和空间复杂度。",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "scenario",
+      "children": []
+    },
+    {
+      "id": "790a8e3b-e71e-4a6a-8677-54f0ff0e5210",
+      "node_type": "task",
+      "text": "请设计一个支持高并发的分布式缓存系统。你需要考虑的关键组件、数据一致性问题、缓存穿透/击穿/雪崩的应对策略、以及如何保证高可用和可扩展性。不需要具体实现代码，重点描述你的设计思路和技术选型。",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "design",
+      "children": []
+    },
+    {
+      "id": "b4609cc6-4619-42c4-9231-52f6cf563c5a",
+      "node_type": "task",
+      "text": "你负责的一个线上微服务，最近经常收到内存溢出（OOM）的告警，但服务并未立即崩溃。请描述你排查此类问题的思路、常用的工具和可能的解决方案。你认为哪些常见编码模式或配置可能导致这种情况？",
+      "answer": "",
+      "depth": 0,
+      "status": "pending",
+      "score": null,
+      "verdict": null,
+      "feedback": "",
+      "task_type": "debug",
+      "children": []
+    }
+  ],
+  "history": [
+    {
+      "role": "assistant",
+      "content": "请你介绍一个你做过的最有挑战性的项目，详细说明你在其中的角色、遇到的技术难点，以及你是如何通过技术决策和实现来解决这些难点的。"
+    }
+  ]
+}

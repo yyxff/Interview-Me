@@ -19,8 +19,11 @@ interface ThoughtNode {
   depth: number;
   status: 'pending' | 'active' | 'asking' | 'answering' | 'answered' | 'scored' | 'done';
   score: number | null;
-  verdict: 'pass' | 'continue' | 'deep_dive' | null;
+  verdict: 'pass' | 'deepen' | 'pivot' | 'back_up' | null;
   feedback: string;
+  reasoning: string;
+  director_note: string;
+  question_intent: string;
   task_type: string;
   children: ThoughtNode[];
 }
@@ -195,10 +198,13 @@ function InfoPanel({
           )}
           {node.verdict && node.verdict !== 'pass' && (
             <span className={`info-task-verdict info-task-verdict--${node.verdict}`}>
-              {node.verdict === 'deep_dive' ? '深挖' : '追问'}
+              {node.verdict === 'deepen' ? '深挖' : node.verdict === 'pivot' ? '转向' : node.verdict === 'back_up' ? '退层' : node.verdict}
             </span>
           )}
         </div>
+        {node.question_intent && !isTask && (
+          <div className="info-task-intent">考察：{node.question_intent}</div>
+        )}
         {node.feedback && (node.status === 'done' || node.status === 'scored') && (
           <div className="info-task-fb">{node.feedback}</div>
         )}
