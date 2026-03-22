@@ -883,8 +883,8 @@ class InterviewChatRequest(BaseModel):
 async def interview_start(req: StartInterviewRequest):
     """
     创建面试会话：
-      INIT → PLANNING（Director 拆分任务）→ READY → INTERVIEWING（激活第一个任务）
-    返回 session_id + tasks + sm 快照。
+      INIT → PLANNING（Director 拆分任务）→ ASKING（面试官首问）→ ANSWERING
+    返回 session_id + opening_message + tree + sm 快照。
     """
     if _provider is None:
         raise HTTPException(status_code=503, detail="LLM 未配置")
@@ -901,30 +901,19 @@ async def interview_start(req: StartInterviewRequest):
     _ia._sessions[session.session_id] = session
 
     try:
-        # INIT → PLANNING
-        session.sm.transition("PLANNING")
-        await _ia.director_plan(session)
-        # director_plan 结束后 SM 处于 READY
-
-        # READY → INTERVIEWING（激活第一个任务）
-        first = _ia._next_pending(session.tasks)
-        if first is None:
-            raise RuntimeError("导演未生成任何任务")
-        first.status = "active"
-        session.sm.current_task_id = first.id
-        session.sm.transition("INTERVIEWING", task_id=first.id)
-
+        opening_message = await _ia.start_interview(session)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"面试规划失败: {e}")
 
     print(
         f"[interview/start] session={session.session_id} "
-        f"tasks={len(session.tasks)} sm={session.sm.state}"
+        f"tasks={len(session.roots)} sm={session.sm.state}"
     )
     return {
-        "session_id": session.session_id,
-        "tasks":      _ia.tasks_to_dict(session.tasks),
-        "sm":         session.sm.to_dict(),
+        "session_id":      session.session_id,
+        "opening_message": opening_message,
+        "tree":            _ia.tree_to_dict(session.roots),
+        "sm":              session.sm.to_dict(),
     }
 
 
@@ -936,7 +925,7 @@ def interview_session_get(session_id: str):
     return {
         "session_id": s.session_id,
         "sm":         s.sm.to_dict(),
-        "tasks":      _ia.tasks_to_dict(s.tasks),
+        "tree":       _ia.tree_to_dict(s.roots),
         "sm_log":     s.sm.event_log[-20:],
     }
 
@@ -965,15 +954,15 @@ async def interview_chat(req: InterviewChatRequest):
     if s.sm.state == "DONE":
         async def _done():
             yield f"data: {json.dumps({'text': '面试已全部结束，感谢您的参与！'}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'sm': s.sm.to_dict(), 'tasks': _ia.tasks_to_dict(s.tasks)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'sm': s.sm.to_dict(), 'tree': _ia.tree_to_dict(s.roots)}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(_done(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    if s.sm.state != "INTERVIEWING":
+    if s.sm.state != "ANSWERING":
         raise HTTPException(
             status_code=409,
-            detail=f"状态机当前为 {s.sm.state}，只有 INTERVIEWING 状态才能接收消息",
+            detail=f"状态机当前为 {s.sm.state}，只有 ANSWERING 状态才能接收消息",
         )
 
     async def _generate():
@@ -992,8 +981,8 @@ async def interview_chat(req: InterviewChatRequest):
             yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.015)
 
-        # 状态更新事件（无论是否结束话题，都下发最新 sm+tasks）
-        yield f"data: {json.dumps({'sm': result['sm'], 'tasks': result['tasks']}, ensure_ascii=False)}\n\n"
+        # 状态更新事件（无论是否结束话题，都下发最新 sm+tree）
+        yield f"data: {json.dumps({'sm': result['sm'], 'tree': result['tree']}, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
 

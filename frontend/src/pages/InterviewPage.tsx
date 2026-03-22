@@ -11,21 +11,25 @@ const SILENCE_TIMEOUT_MS = 800;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface TaskNode {
+interface ThoughtNode {
   id: string;
-  task: string;
-  task_type: string;
+  node_type: 'task' | 'question';
+  text: string;
+  answer: string;
   depth: number;
-  status: 'pending' | 'active' | 'done';
+  status: 'pending' | 'active' | 'asking' | 'answering' | 'answered' | 'scored' | 'done';
   score: number | null;
+  verdict: 'pass' | 'continue' | 'deep_dive' | null;
   feedback: string;
-  children: TaskNode[];
+  task_type: string;
+  children: ThoughtNode[];
 }
 
 interface SMSnapshot {
   state: string;
+  current_node_id: string | null;
   current_task_id: string | null;
-  last_score: { score: number; feedback: string } | null;
+  last_score: { score: number; verdict: string; feedback: string } | null;
 }
 
 type AgentState = 'idle' | 'running' | 'done';
@@ -42,9 +46,9 @@ const INITIAL_AGENT_STATUS: AgentStatus = {
   interviewer: { state: 'idle', note: '等待开始' },
 };
 
-// SM cycling states (for the loop diagram)
-const SM_CYCLE = ['INTERVIEWING', 'SCORING', 'DIRECTING'] as const;
-const SM_ENTRY = ['INIT', 'PLANNING', 'READY'] as const;
+// SM states for the cycle diagram
+const SM_ENTRY = ['INIT', 'PLANNING'] as const;
+const SM_CYCLE = ['ASKING', 'ANSWERING', 'SCORING'] as const;
 
 // ── SMPanel ───────────────────────────────────────────────────────────────────
 
@@ -57,29 +61,33 @@ function SMPanel({ sm, agentStatus }: { sm: SMSnapshot | null; agentStatus: Agen
 
   const cur = sm?.state ?? 'INIT';
   const isDone = cur === 'DONE';
+  const isDirecting = cur === 'DIRECTING';
 
   return (
     <div className="sm-panel">
       {/* Header */}
       <div className="sm-panel-header">
         <span className="im-panel-title">Agent 状态机</span>
-        <span className={`sm-state-badge sm-state-badge--${isDone ? 'done' : SM_CYCLE.includes(cur as any) ? 'active' : 'idle'}`}>
+        <span className={`sm-state-badge sm-state-badge--${isDone ? 'done' : SM_CYCLE.includes(cur as any) || isDirecting ? 'active' : 'idle'}`}>
           {cur}
         </span>
       </div>
 
       {/* Entry states strip */}
       <div className="sm-entry-strip">
-        {SM_ENTRY.map((s, i) => (
-          <span key={s} className={`sm-node sm-node--sm ${cur === s ? 'sm-node--cur' : s === 'READY' || s === 'PLANNING' || s === 'INIT' ? (
-            ['PLANNING','READY','INTERVIEWING','SCORING','DIRECTING','DONE'].indexOf(cur) >
-            ['INIT','PLANNING','READY'].indexOf(s) ? 'sm-node--past' : '') : ''}`}>
-            {s}
-            {i < SM_ENTRY.length - 1 && <span className="sm-arrow-small">›</span>}
-          </span>
-        ))}
+        {SM_ENTRY.map((s, i) => {
+          const entryOrder = ['INIT', 'PLANNING'];
+          const cycleStarted = !entryOrder.includes(cur) && cur !== 'INIT';
+          const isPast = cycleStarted || entryOrder.indexOf(cur) > entryOrder.indexOf(s);
+          return (
+            <span key={s} className={`sm-node sm-node--sm ${cur === s ? 'sm-node--cur' : isPast ? 'sm-node--past' : ''}`}>
+              {s}
+              {i < SM_ENTRY.length - 1 && <span className="sm-arrow-small">›</span>}
+            </span>
+          );
+        })}
         <span className="sm-arrow-small">›</span>
-        <span className={`sm-node sm-node--sm ${SM_CYCLE.includes(cur as any) ? 'sm-node--cur' : ''}`}>
+        <span className={`sm-node sm-node--sm ${SM_CYCLE.includes(cur as any) || isDirecting ? 'sm-node--cur' : ''}`}>
           循环
         </span>
         {isDone && <><span className="sm-arrow-small">›</span><span className="sm-node sm-node--sm sm-node--done">DONE</span></>}
@@ -95,6 +103,14 @@ function SMPanel({ sm, agentStatus }: { sm: SMSnapshot | null; agentStatus: Agen
         ))}
         <span className="sm-loop-arrow">↩</span>
       </div>
+      {isDirecting && (
+        <div className="sm-directing-note">
+          <span className="sm-arrow-small">↳</span>
+          <span className={`sm-node sm-node--cur`}>DIRECTING</span>
+          <span className="sm-arrow-small">›</span>
+          <span className="sm-node">ASKING</span>
+        </div>
+      )}
 
       {/* Agent rows */}
       <div className="sm-agents">
@@ -114,6 +130,7 @@ function SMPanel({ sm, agentStatus }: { sm: SMSnapshot | null; agentStatus: Agen
           <span className={`sm-score-num sm-score-num--${sm.last_score.score >= 4 ? 'good' : sm.last_score.score <= 2 ? 'low' : 'mid'}`}>
             {sm.last_score.score}/5
           </span>
+          <span className={`sm-verdict sm-verdict--${sm.last_score.verdict}`}>{sm.last_score.verdict}</span>
           <span className="sm-score-fb">{sm.last_score.feedback}</span>
         </div>
       )}
@@ -121,45 +138,54 @@ function SMPanel({ sm, agentStatus }: { sm: SMSnapshot | null; agentStatus: Agen
   );
 }
 
-// ── InfoPanel (Tasks + Chat tabs) ─────────────────────────────────────────────
+// ── InfoPanel (思维树 + Chat tabs) ────────────────────────────────────────────
 
 function InfoPanel({
-  tasks,
+  tree,
   sm,
   messages,
   interimTranscript,
   chatBodyRef,
 }: {
-  tasks: TaskNode[];
+  tree: ThoughtNode[];
   sm: SMSnapshot | null;
   messages: Message[];
   interimTranscript: string;
   chatBodyRef: React.RefObject<HTMLDivElement>;
 }) {
-  const [tab, setTab] = useState<'tasks' | 'chat'>('tasks');
+  const [tab, setTab] = useState<'tree' | 'chat'>('tree');
 
-  const renderTask = (node: TaskNode, indent = 0): React.ReactNode => {
-    const isActive = node.id === sm?.current_task_id;
+  const renderNode = (node: ThoughtNode, indent = 0): React.ReactNode => {
+    const isActiveNode = node.id === sm?.current_node_id || node.id === sm?.current_task_id;
+    const isTask = node.node_type === 'task';
     return (
       <div key={node.id}
-        className={`info-task ${isActive ? 'info-task--active' : ''} ${node.status === 'done' ? 'info-task--done' : ''} ${node.status === 'pending' ? 'info-task--pending' : ''}`}
+        className={`info-task ${isActiveNode ? 'info-task--active' : ''} ${node.status === 'done' ? 'info-task--done' : ''} ${node.status === 'pending' ? 'info-task--pending' : ''} ${isTask ? 'info-task--task' : 'info-task--question'}`}
         style={{ marginLeft: indent * 14 }}
       >
         <div className="info-task-row">
           <span className="info-task-bullet">
-            {node.status === 'done' ? (node.score && node.score >= 4 ? '✓' : '·') : isActive ? '▶' : '○'}
+            {isTask
+              ? (node.status === 'done' ? '✓' : isActiveNode ? '▶' : '○')
+              : (node.status === 'done' || node.status === 'scored' ? (node.score && node.score >= 4 ? '✓' : '·') : isActiveNode ? '❓' : '·')
+            }
           </span>
-          <span className="info-task-text">{node.task}</span>
+          <span className="info-task-text">{node.text}</span>
           {node.score !== null && (
             <span className={`info-task-score info-task-score--${node.score >= 4 ? 'good' : node.score <= 2 ? 'low' : 'mid'}`}>
               {node.score}/5
             </span>
           )}
+          {node.verdict && node.verdict !== 'pass' && (
+            <span className={`info-task-verdict info-task-verdict--${node.verdict}`}>
+              {node.verdict === 'deep_dive' ? '深挖' : '追问'}
+            </span>
+          )}
         </div>
-        {node.feedback && node.status === 'done' && (
+        {node.feedback && (node.status === 'done' || node.status === 'scored') && (
           <div className="info-task-fb">{node.feedback}</div>
         )}
-        {node.children.map(c => renderTask(c, indent + 1))}
+        {node.children.map(c => renderNode(c, indent + 1))}
       </div>
     );
   };
@@ -168,8 +194,8 @@ function InfoPanel({
     <div className="info-panel">
       {/* Tab bar */}
       <div className="info-tabs">
-        <button className={`info-tab ${tab === 'tasks' ? 'info-tab--active' : ''}`} onClick={() => setTab('tasks')}>
-          考察进度
+        <button className={`info-tab ${tab === 'tree' ? 'info-tab--active' : ''}`} onClick={() => setTab('tree')}>
+          思维树
         </button>
         <button className={`info-tab ${tab === 'chat' ? 'info-tab--active' : ''}`} onClick={() => setTab('chat')}>
           对话记录
@@ -178,10 +204,10 @@ function InfoPanel({
 
       {/* Tab content */}
       <div className="info-body">
-        {tab === 'tasks' ? (
-          tasks.length === 0
-            ? <p className="info-empty">面试开始后显示考察路径</p>
-            : <>{tasks.map(n => renderTask(n))}</>
+        {tab === 'tree' ? (
+          tree.length === 0
+            ? <p className="info-empty">面试开始后显示思维树</p>
+            : <>{tree.map(n => renderNode(n))}</>
         ) : (
           <div className="info-chat" ref={chatBodyRef}>
             {messages.length === 0
@@ -209,8 +235,8 @@ function InfoPanel({
 // ── SetupOverlay ──────────────────────────────────────────────────────────────
 
 function SetupOverlay({ loading, onStart }: { loading: boolean; onStart: (jd: string, dir: string) => void }) {
-  const [jd, setJd]         = useState('');
-  const [dir, setDir]       = useState('');
+  const [jd, setJd]   = useState('');
+  const [dir, setDir] = useState('');
 
   return (
     <div className="interview-overlay">
@@ -248,7 +274,7 @@ export default function InterviewPage() {
   const [loading, setLoading]                 = useState(false);
   const [error, setError]                     = useState<string | null>(null);
   const [sessionId, setSessionId]             = useState<string | null>(null);
-  const [tasks, setTasks]                     = useState<TaskNode[]>([]);
+  const [tree, setTree]                       = useState<ThoughtNode[]>([]);
   const [sm, setSm]                           = useState<SMSnapshot | null>(null);
   const [agentStatus, setAgentStatus]         = useState<AgentStatus>(INITIAL_AGENT_STATUS);
 
@@ -295,7 +321,7 @@ export default function InterviewPage() {
 
     if (text) setMessages(prev => [...prev, { id: `u-${Date.now()}`, role: 'user', content: text, timestamp: new Date() }]);
     setState('processing');
-    setAgentStatus(s => ({ ...s, interviewer: { state: 'running', note: '思考中' } }));
+    setAgentStatus(s => ({ ...s, interviewer: { state: 'running', note: '思考中' }, scorer: { state: 'running', note: '评分中' } }));
 
     const assistantId = `a-${Date.now()}`;
     setMessages(prev => [...prev, { id: assistantId, role: 'assistant' as const, content: '', timestamp: new Date() }]);
@@ -332,18 +358,20 @@ export default function InterviewPage() {
             if (ev.sm !== undefined) {
               const newSm: SMSnapshot = ev.sm;
               setSm(newSm);
-              if (ev.tasks) setTasks(ev.tasks);
+              if (ev.tree) setTree(ev.tree);
               if (newSm.state === 'DONE') {
                 setAgentStatus({
                   director:    { state: 'done', note: '面试结束' },
                   scorer:      { state: 'done', note: '评分完成' },
                   interviewer: { state: 'done', note: '面试结束' },
                 });
-              } else if (newSm.state === 'INTERVIEWING' && newSm.last_score) {
+              } else if (newSm.state === 'ANSWERING' && newSm.last_score) {
+                const ls = newSm.last_score;
                 setAgentStatus(s => ({
                   ...s,
-                  director:  { state: 'idle', note: '已更新任务路径' },
-                  scorer:    { state: 'done', note: `${newSm.last_score!.score}/5 · ${newSm.last_score!.feedback.slice(0,18)}` },
+                  director:  { state: ls.verdict === 'pass' ? 'running' : 'idle', note: ls.verdict === 'pass' ? '推进下一任务' : '等待评分结果' },
+                  scorer:    { state: 'done', note: `${ls.score}/5 · ${ls.verdict} · ${ls.feedback.slice(0, 18)}` },
+                  interviewer: { state: 'idle', note: '等待回答' },
                 }));
               }
             }
@@ -356,7 +384,7 @@ export default function InterviewPage() {
     } catch (err: any) {
       setError(err.message ?? '请求失败');
       setState('listening');
-      setAgentStatus(s => ({ ...s, interviewer: { state: 'idle', note: '出错' } }));
+      setAgentStatus(s => ({ ...s, interviewer: { state: 'idle', note: '出错' }, scorer: { state: 'idle', note: '待机' } }));
     }
   }, []);
 
@@ -384,7 +412,7 @@ export default function InterviewPage() {
   const handleStart = useCallback(async (jd: string, direction: string) => {
     setError(null);
     setLoading(true);
-    setAgentStatus({ director: { state: 'running', note: '规划考察任务…' }, scorer: { state: 'idle', note: '待机' }, interviewer: { state: 'idle', note: '等待导演…' } });
+    setAgentStatus({ director: { state: 'running', note: '规划考察任务…' }, scorer: { state: 'idle', note: '待机' }, interviewer: { state: 'running', note: '生成开场问题…' } });
     try {
       const res = await fetch(`${API_BASE}/interview/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -394,12 +422,22 @@ export default function InterviewPage() {
       const data = await res.json();
       setSessionId(data.session_id);
       sessionIdRef.current = data.session_id;
-      setTasks(data.tasks);
+      setTree(data.tree ?? []);
       setSm(data.sm);
-      setAgentStatus(s => ({ ...s, director: { state: 'done', note: `已规划 ${data.tasks.length} 个任务` }, interviewer: { state: 'running', note: '开场中…' } }));
+      setAgentStatus(s => ({
+        ...s,
+        director:    { state: 'done', note: `已规划 ${(data.tree ?? []).filter((n: ThoughtNode) => n.node_type === 'task').length} 个任务` },
+        interviewer: { state: 'idle', note: '等待回答' },
+      }));
+
+      // Show opening message directly (no extra API call needed)
+      if (data.opening_message) {
+        const msgId = `a-${Date.now()}`;
+        setMessages([{ id: msgId, role: 'assistant', content: data.opening_message, timestamp: new Date() }]);
+        ttsActionsRef.current.speak(data.opening_message);
+      }
+
       setIsStarted(true);
-      setState('processing');
-      await submitTurn('');
       setState('listening');
       startRecognition();
     } catch (e: any) {
@@ -408,7 +446,7 @@ export default function InterviewPage() {
     } finally {
       setLoading(false);
     }
-  }, [submitTurn, startRecognition]);
+  }, [startRecognition]);
 
   const handleStop = useCallback(() => {
     setIsStarted(false); setState('idle'); stopRecognition();
@@ -419,7 +457,7 @@ export default function InterviewPage() {
 
   const handleReset = useCallback(() => {
     setIsStarted(false); setState('idle'); setSessionId(null);
-    setSm(null); setTasks([]); setMessages([]);
+    setSm(null); setTree([]); setMessages([]);
     setAgentStatus(INITIAL_AGENT_STATUS); setError(null);
   }, []);
 
@@ -463,7 +501,7 @@ export default function InterviewPage() {
 
         {/* ④ 后台信息 */}
         <div className="interview-tile interview-tile--info">
-          <InfoPanel tasks={tasks} sm={sm} messages={messages}
+          <InfoPanel tree={tree} sm={sm} messages={messages}
             interimTranscript={interimTranscript} chatBodyRef={chatBodyRef} />
         </div>
 

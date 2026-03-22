@@ -1,30 +1,20 @@
-"""多 Agent 模拟面试系统
-======================
-状态机驱动的三 Agent 协作：
+"""多 Agent 模拟面试 —— 思维树 + 状态机
+========================================
 
-    INIT
-     │ Director.plan()
-     ▼
-    PLANNING
-     │ 任务树写入完成
-     ▼
-    READY
-     │ 开始面试
-     ▼
-    INTERVIEWING  ◄──────────────────────────────┐
-     │ Interviewer 调用 end_topic                │
-     ▼                                            │
-    SCORING                                       │
-     │ Scorer 评分完成                             │
-     ▼                                            │
-    DIRECTING                                     │
-     │ Director 决策：expand → 插入子任务 ─────────┘
-     │              next   → 下一 pending 任务 ──┘
-     └─────────────── done → DONE
+状态机：
+    INIT → PLANNING → ASKING → ANSWERING → SCORING ─┬→ ASKING      (continue/deep_dive)
+                                                     └→ DIRECTING → ASKING  (pass, 下一任务)
+                                                                 └→ DONE
 
-面试官工具：
-  rag_search(query)  — 内部检索，不改变 SM 状态
-  end_topic()        — 触发 SM INTERVIEWING → SCORING 转换
+思维树（ThoughtNode）：
+    根节点 (node_type='task')  ← Director 在 PLANNING 阶段创建
+    └── 问题节点 (node_type='question')  ← Interviewer 在 ASKING 阶段创建
+        └── 子问题节点 …  (deep_dive/continue 时追加)
+
+Scorer 在每次用户回答后运行，返回 verdict：
+    pass       → Director 推进到下一个 task
+    continue   → Interviewer 在同层追问（sibling 节点）
+    deep_dive  → Interviewer 深挖子问题（child 节点）
 """
 
 from __future__ import annotations
@@ -41,71 +31,69 @@ from typing import Any
 # ── 状态机 ────────────────────────────────────────────────────────────────────
 
 _TRANSITIONS: dict[str, set[str]] = {
-    "INIT":        {"PLANNING"},
-    "PLANNING":    {"READY"},
-    "READY":       {"INTERVIEWING"},
-    "INTERVIEWING":{"SCORING"},
-    "SCORING":     {"DIRECTING"},
-    "DIRECTING":   {"INTERVIEWING", "DONE"},
-    "DONE":        set(),
+    "INIT":       {"PLANNING"},
+    "PLANNING":   {"ASKING"},
+    "ASKING":     {"ANSWERING"},
+    "ANSWERING":  {"SCORING"},
+    "SCORING":    {"ASKING", "DIRECTING"},
+    "DIRECTING":  {"ASKING", "DONE"},
+    "DONE":       set(),
 }
 
 
 class InterviewSM:
-    """面试状态机 —— 所有 Agent 通过它协调。"""
-
     def __init__(self):
         self.state: str = "INIT"
-        self.current_task_id: str | None = None
-        self.last_score: dict | None = None        # {score, feedback}
+        self.current_node_id: str | None = None   # 当前问题节点 id
+        self.current_task_id: str | None = None   # 当前根任务节点 id
+        self.last_score: dict | None = None        # {score, verdict, feedback}
         self.event_log: list[dict] = []
 
     def transition(self, new_state: str, **meta) -> None:
         allowed = _TRANSITIONS.get(self.state, set())
         if new_state not in allowed:
-            raise ValueError(
-                f"非法状态转换 {self.state!r} → {new_state!r}，"
-                f"允许的目标状态: {allowed}"
-            )
-        self.event_log.append({
-            "from": self.state, "to": new_state,
-            "ts": round(time.time(), 3), **meta,
-        })
+            raise ValueError(f"非法转换 {self.state!r} → {new_state!r}，允许: {allowed}")
+        self.event_log.append({"from": self.state, "to": new_state, "ts": round(time.time(), 3), **meta})
         self.state = new_state
 
     def to_dict(self) -> dict:
         return {
             "state":           self.state,
+            "current_node_id": self.current_node_id,
             "current_task_id": self.current_task_id,
             "last_score":      self.last_score,
         }
 
 
-# ── 数据结构 ──────────────────────────────────────────────────────────────────
+# ── 思维树节点 ────────────────────────────────────────────────────────────────
 
 @dataclass
-class TaskNode:
-    id:          str
-    task:        str            # 具体考察内容，e.g."解释 TCP 三次握手的原理"
-    task_type:   str = "knowledge"  # experience/knowledge/concept/design/debug/scenario
-    depth:       int = 0
-    status:      str = "pending"   # pending/active/done/skipped
-    score:       int | None = None
-    feedback:    str = ""
-    children:    list["TaskNode"] = field(default_factory=list)
-    parent_id:   str | None = None
+class ThoughtNode:
+    id:         str
+    node_type:  str          # 'task' | 'question'
+    text:       str          # 任务描述 或 问题文本
+    answer:     str  = ""    # 候选人的回答（question 节点）
+    depth:      int  = 0
+    status:     str  = "pending"   # pending/active/asking/answering/scored/done
+    score:      int | None = None
+    verdict:    str | None = None  # pass/continue/deep_dive
+    feedback:   str  = ""
+    task_type:  str  = ""          # task 节点：experience/knowledge/…
+    children:   list["ThoughtNode"] = field(default_factory=list)
+    parent_id:  str | None = None
 
+
+# ── Session ───────────────────────────────────────────────────────────────────
 
 @dataclass
 class InterviewSession:
-    session_id:    str
-    jd:            str
-    direction:     str
-    profile_text:  str
-    sm:            InterviewSM = field(default_factory=InterviewSM)
-    tasks:         list[TaskNode] = field(default_factory=list)
-    history:       list[dict] = field(default_factory=list)   # 全程对话
-    topic_history: list[dict] = field(default_factory=list)   # 当前话题对话（评分用）
+    session_id:   str
+    jd:           str
+    direction:    str
+    profile_text: str
+    sm:           InterviewSM            = field(default_factory=InterviewSM)
+    roots:        list[ThoughtNode]      = field(default_factory=list)  # 根任务列表
+    history:      list[dict]             = field(default_factory=list)  # 全程对话
 
 
 # ── 全局状态 ──────────────────────────────────────────────────────────────────
@@ -119,14 +107,14 @@ def set_provider(p: Any) -> None:
     _provider = p
 
 
-def get_session(session_id: str) -> InterviewSession | None:
-    return _sessions.get(session_id)
+def get_session(sid: str) -> InterviewSession | None:
+    return _sessions.get(sid)
 
 
 # ── 树操作 ────────────────────────────────────────────────────────────────────
 
-def _flat(nodes: list[TaskNode]) -> list[TaskNode]:
-    out: list[TaskNode] = []
+def _flat(nodes: list[ThoughtNode]) -> list[ThoughtNode]:
+    out: list[ThoughtNode] = []
     q = list(nodes)
     while q:
         n = q.pop(0)
@@ -135,33 +123,36 @@ def _flat(nodes: list[TaskNode]) -> list[TaskNode]:
     return out
 
 
-def _find(nodes: list[TaskNode], task_id: str | None) -> TaskNode | None:
-    if task_id is None:
+def _find(roots: list[ThoughtNode], nid: str | None) -> ThoughtNode | None:
+    if nid is None:
         return None
-    for n in _flat(nodes):
-        if n.id == task_id:
+    for n in _flat(roots):
+        if n.id == nid:
             return n
     return None
 
 
-def _next_pending(nodes: list[TaskNode]) -> TaskNode | None:
-    for n in _flat(nodes):
+def _next_pending_task(roots: list[ThoughtNode]) -> ThoughtNode | None:
+    for n in roots:
         if n.status == "pending":
             return n
     return None
 
 
-def tasks_to_dict(nodes: list[TaskNode]) -> list[dict]:
+def tree_to_dict(nodes: list[ThoughtNode]) -> list[dict]:
     return [
         {
             "id":        n.id,
-            "task":      n.task,
-            "task_type": n.task_type,
+            "node_type": n.node_type,
+            "text":      n.text,
+            "answer":    n.answer[:120] if n.answer else "",
             "depth":     n.depth,
             "status":    n.status,
             "score":     n.score,
+            "verdict":   n.verdict,
             "feedback":  n.feedback,
-            "children":  tasks_to_dict(n.children),
+            "task_type": n.task_type,
+            "children":  tree_to_dict(n.children),
         }
         for n in nodes
     ]
@@ -171,7 +162,7 @@ def tasks_to_dict(nodes: list[TaskNode]) -> list[dict]:
 
 async def _llm(messages: list[dict], system: str = "", timeout: float = 50.0) -> str:
     if _provider is None:
-        raise RuntimeError("LLM provider 未注入，请先调用 set_provider()")
+        raise RuntimeError("LLM provider 未注入")
     return await asyncio.wait_for(_provider.chat(messages, system), timeout=timeout)
 
 
@@ -192,364 +183,313 @@ def _parse_json(text: str, default: Any) -> Any:
 
 # ── DirectorAgent ─────────────────────────────────────────────────────────────
 
-_PLAN_SYSTEM = """\
-你是技术面试导演，负责将整场面试拆分为具体的考察任务。
-
-要求：
-- 生成 5-8 个任务，每个是一道具体的面试题/场景，不是宽泛话题
-- 任务覆盖候选人背景、岗位要求，由浅入深排列
-- task_type 只能是: experience / knowledge / concept / design / debug / scenario
+_PLAN_SYS = """\
+你是技术面试导演。根据候选人 Profile 和 JD，将整场面试拆分为 4-6 个具体的考察任务。
+每个任务是一道具体的面试题方向，不是宽泛话题。
+task_type 只能是: experience/knowledge/concept/design/debug/scenario
 
 输出 JSON 数组（只输出数组，不加代码块）：
-[
-  {"task":"介绍你做过的最有挑战的项目，重点说说遇到了哪些技术难点","task_type":"experience"},
-  {"task":"解释 TCP 三次握手的原理以及为什么需要三次","task_type":"concept"},
-  ...
-]"""
+[{"task":"介绍你做过最有挑战的项目，重点讲技术难点","task_type":"experience"},...]"""
 
-_PLAN_USER = """\
-候选人 Profile：
-{profile}
-
-岗位 JD：
-{jd}
-
-考察方向（可选）：
-{direction}"""
-
-_DECIDE_SYSTEM = """\
-你是技术面试导演，根据评分结果决定下一步。
-
-规则：
-- score ≥ 4：标记完成，进入下一任务
-- score 2-3：拆解为 2-3 个更具体的跟进任务
-- score 1：拆解为基础概念确认 + 简单应用题（至少 2 个子任务）
-
-输出 JSON（二选一，只输出 JSON）：
-{"action":"next"}
-{"action":"expand","subtasks":[{"task":"...","task_type":"concept"},{"task":"...","task_type":"knowledge"}]}"""
-
-_DECIDE_USER = """\
-刚完成的考察任务：「{task}」
-候选人评分：{score}/5
-评分反馈：{feedback}
-
-当前任务树（供参考）：
-{tree}"""
+_PLAN_USR = "候选人 Profile：\n{profile}\n\n岗位 JD：\n{jd}\n\n考察方向：\n{direction}"
 
 
 async def director_plan(session: InterviewSession) -> None:
-    """PLANNING 阶段：拆分整场面试为具体任务树，写入 SM。"""
+    """PLANNING 阶段：创建根任务节点。"""
     assert session.sm.state == "PLANNING"
-
-    user_msg = _PLAN_USER.format(
-        profile=(session.profile_text or "（未提供）")[:2000],
-        jd=(session.jd or "（未指定，通用技术岗位）")[:1000],
-        direction=(session.direction or "（未指定，根据候选人背景判断）"),
+    text = await _llm(
+        [{"role": "user", "content": _PLAN_USR.format(
+            profile=(session.profile_text or "（未提供）")[:2000],
+            jd=(session.jd or "（未指定）")[:1000],
+            direction=(session.direction or "（未指定）"),
+        )}],
+        system=_PLAN_SYS,
     )
-    text = await _llm([{"role": "user", "content": user_msg}], system=_PLAN_SYSTEM)
     raw = _parse_json(text, default=[])
-    if not isinstance(raw, list):
-        raw = []
-
-    tasks: list[TaskNode] = []
-    for item in raw[:8]:
-        if not isinstance(item, dict):
-            continue
-        task_text = item.get("task", "").strip()
-        task_type = item.get("task_type", "knowledge")
-        if task_text:
-            tasks.append(TaskNode(
-                id=str(uuid.uuid4()),
-                task=task_text,
-                task_type=task_type,
-                depth=0,
-            ))
-
-    if not tasks:  # 降级兜底
-        tasks = [
-            TaskNode(id=str(uuid.uuid4()), task="介绍一下你最近做的项目", task_type="experience"),
-            TaskNode(id=str(uuid.uuid4()), task="描述一个你熟悉的核心技术概念", task_type="concept"),
-        ]
-
-    session.tasks = tasks
-    session.sm.transition("READY")
+    roots: list[ThoughtNode] = []
+    for item in (raw if isinstance(raw, list) else [])[:6]:
+        t = item.get("task", "").strip() if isinstance(item, dict) else ""
+        if t:
+            roots.append(ThoughtNode(id=str(uuid.uuid4()), node_type="task",
+                                     text=t, task_type=item.get("task_type", "knowledge")))
+    if not roots:
+        roots = [ThoughtNode(id=str(uuid.uuid4()), node_type="task", text="介绍你的项目经历")]
+    session.roots = roots
 
 
-async def director_decide(session: InterviewSession, task_id: str) -> None:
-    """DIRECTING 阶段：读评分，决定 expand/next/done，转换 SM 状态。"""
+async def director_advance(session: InterviewSession) -> ThoughtNode | None:
+    """DIRECTING 阶段：标记当前任务完成，返回下一个待处理任务（None=全部完成）。"""
     assert session.sm.state == "DIRECTING"
-
-    score_info = session.sm.last_score or {"score": 3, "feedback": "无反馈"}
-    task       = _find(session.tasks, task_id)
-
-    if task:
-        task.score    = score_info["score"]
-        task.feedback = score_info["feedback"]
-        task.status   = "done"
-
-    user_msg = _DECIDE_USER.format(
-        task=task.task if task else "（未知）",
-        score=score_info["score"],
-        feedback=score_info["feedback"],
-        tree=json.dumps(tasks_to_dict(session.tasks), ensure_ascii=False, indent=2)[:3000],
-    )
-    text = await _llm([{"role": "user", "content": user_msg}], system=_DECIDE_SYSTEM)
-    decision = _parse_json(text, default={"action": "next"})
-
-    if decision.get("action") == "expand" and task:
-        for st in decision.get("subtasks", [])[:3]:
-            if not isinstance(st, dict):
-                continue
-            child = TaskNode(
-                id=str(uuid.uuid4()),
-                task=st.get("task", "").strip(),
-                task_type=st.get("task_type", "knowledge"),
-                depth=(task.depth + 1),
-                status="pending",
-                parent_id=task.id,
-            )
-            if child.task:
-                task.children.append(child)
-
-    nxt = _next_pending(session.tasks)
+    cur = _find(session.roots, session.sm.current_task_id)
+    if cur:
+        cur.status = "done"
+    nxt = _next_pending_task(session.roots)
     if nxt:
         nxt.status = "active"
         session.sm.current_task_id = nxt.id
-        session.sm.transition("INTERVIEWING", task_id=nxt.id)
-    else:
-        session.sm.current_task_id = None
-        session.sm.transition("DONE")
+    return nxt
 
 
 # ── ScorerAgent ───────────────────────────────────────────────────────────────
 
-_SCORER_SYSTEM = """\
-你是技术面试评分员。对候选人在指定考察任务上的表现进行评分。
+_SCORER_SYS = """\
+你是面试评分员。根据候选人的回答对当前问题进行评分并给出判定。
 
-评分标准（1-5 分）：
-5 = 准确完整，有深度，结合实际经验
-4 = 正确，覆盖核心要点
-3 = 基本正确，但有遗漏或不够深入
-2 = 有概念但理解不清
-1 = 基本不了解
+评分（1-5）：
+5=准确完整有深度  4=正确覆盖要点  3=基本正确有遗漏  2=概念模糊  1=不了解
 
-只输出 JSON（不加代码块）：{"score":4,"feedback":"一句话总结表现"}"""
+判定规则：
+- "pass"    : score≥4，或已充分考察该方向，可推进下一话题
+- "continue": score 2-3，回答方向对但不够深入，换角度追问
+- "deep_dive": score≤2，存在明显知识盲区，需要深挖基础
+
+只输出 JSON（不加代码块）：{"score":3,"verdict":"continue","feedback":"了解概念但未说明原理"}"""
+
+_SCORER_USR = """\
+当前考察任务（上下文）：{task_text}
+面试官的问题：{question}
+候选人的回答：{answer}
+本轮已追问次数：{follow_up_count}（若已超过3次，优先选 pass 推进）"""
 
 
-async def scorer_evaluate(task: TaskNode, topic_history: list[dict]) -> dict:
-    """SCORING 阶段：对本话题对话评分，返回 {score, feedback}。"""
-    conv = "\n".join(
-        f"{'面试官' if m['role'] == 'assistant' else '候选人'}: {m['content'][:400]}"
-        for m in topic_history[-14:]
+async def scorer_evaluate(session: InterviewSession, question_node: ThoughtNode, answer: str) -> dict:
+    """SCORING 阶段：评分并给出判定。"""
+    assert session.sm.state == "SCORING"
+    # 找根任务上下文
+    task_node = _find(session.roots, session.sm.current_task_id)
+    task_text = task_node.text if task_node else "（未知）"
+    # 统计本轮追问次数（当前任务下的问题数）
+    follow_up_count = sum(1 for n in _flat(session.roots)
+                          if n.node_type == "question" and n.status in ("scored", "done")
+                          and _is_under_task(session.roots, n, session.sm.current_task_id))
+
+    text = await _llm(
+        [{"role": "user", "content": _SCORER_USR.format(
+            task_text=task_text,
+            question=question_node.text,
+            answer=answer[:600],
+            follow_up_count=follow_up_count,
+        )}],
+        system=_SCORER_SYS,
     )
-    user_msg = f"考察任务：「{task.task}」（类型：{task.task_type}）\n\n对话内容：\n{conv}"
-    text = await _llm([{"role": "user", "content": user_msg}], system=_SCORER_SYSTEM)
-    result = _parse_json(text, default={"score": 3, "feedback": "评分解析失败"})
-    return {
-        "score":    max(1, min(5, int(result.get("score", 3)))),
-        "feedback": result.get("feedback", ""),
-    }
+    result = _parse_json(text, default={"score": 3, "verdict": "continue", "feedback": "解析失败"})
+    score   = max(1, min(5, int(result.get("score", 3))))
+    verdict = result.get("verdict", "continue")
+    if verdict not in ("pass", "continue", "deep_dive"):
+        verdict = "continue"
+    return {"score": score, "verdict": verdict, "feedback": result.get("feedback", "")}
 
 
-# ── InterviewerAgent（ReAct） ──────────────────────────────────────────────────
+def _is_under_task(roots: list[ThoughtNode], node: ThoughtNode, task_id: str | None) -> bool:
+    """判断 node 是否在 task_id 的子树内。"""
+    if task_id is None:
+        return False
+    for n in _flat(roots):
+        if n.id == task_id:
+            return node in _flat([n])
+    return False
 
-_INTERVIEWER_SYSTEM = """\
-你是一位专业技术面试官。当前考察任务如下：
 
-【考察任务】{task}
-【类型】{task_type}
+# ── InterviewerAgent ──────────────────────────────────────────────────────────
+
+_INTERVIEWER_SYS = """\
+你是一位专业技术面试官，正在考察候选人。
+
+当前考察任务：{task_text}
+你要问的问题类型：{question_context}
+
 {profile_section}
-## 可用工具
+规则：
+- 输出一道具体的面试问题，语气自然专业
+- 问题要针对任务/追问场景，不重复之前问过的问题
+- 如果是 deep_dive，聚焦候选人回答中暴露的薄弱点
+- 只输出问题本身，不加任何前缀或解释
+- 问题长度：1-2句话"""
 
-rag_search — 检索技术知识库，为深度追问提供参考
-格式：
-Action: rag_search
-Action Input: 查询关键词
+_INTERVIEWER_USR_INIT = """\
+这是对话的开始，请提出关于「{task_text}」的第一个问题。
+参考知识（可选）：{rag_context}"""
 
-end_topic — 当你判断该任务已考察完毕时调用（候选人已充分作答或拒绝回答）
-格式：
-Action: end_topic
-Action Input: 无
+_INTERVIEWER_USR_FOLLOWUP = """\
+上一个问题：{prev_question}
+候选人的回答：{prev_answer}
+评分员反馈：{feedback}（判定：{verdict}）
 
-## ReAct 输出格式
+请根据判定提出下一个问题：
+- continue: 换角度继续追问同话题
+- deep_dive: 深挖候选人回答中暴露的薄弱点
 
-Thought: 分析当前情况
-Action: rag_search 或 end_topic
-Action Input: 输入内容
-Observation: 工具返回（由系统填写）
-... (可多轮)
-Final Answer: 直接面向候选人的回复（只有这部分展示给用户）
-
-## 面试官规则
-
-- 首轮：围绕考察任务提出第一个具体问题，不要先自我介绍
-- 追问：根据候选人上一条回答针对性展开，不重复同一问题
-- 每次只问一个问题，等候选人回答
-- 候选人已回答 2-3 次后，评估是否调用 end_topic
-- Final Answer 语气自然，≤4 句话"""
-
-_REACT_MAX_STEPS = 6
+参考知识（可选）：{rag_context}"""
 
 
-async def interviewer_respond(
+async def interviewer_ask(
     session: InterviewSession,
-    task: TaskNode,
-    user_message: str | None,
-) -> tuple[str, bool]:
-    """
-    INTERVIEWING 阶段：ReAct 循环。
-    user_message=None 表示面试官开场提问。
-    返回 (response_text, topic_ended)。
-    """
+    parent_node: ThoughtNode,
+    verdict: str | None = None,
+    score_feedback: str = "",
+) -> str:
+    """ASKING 阶段：生成下一个面试问题，返回问题文本。"""
+    assert session.sm.state == "ASKING"
     import rag as _rag
 
-    profile_section = ""
-    if session.profile_text:
-        profile_section = f"【候选人背景】\n{session.profile_text[:1000]}\n"
+    task_node = _find(session.roots, session.sm.current_task_id)
+    task_text = task_node.text if task_node else "（未知）"
 
-    # 父任务提示（深挖子任务时）
-    parent_hint = ""
-    if task.parent_id:
-        parent = _find(session.tasks, task.parent_id)
-        if parent:
-            parent_hint = f"（是「{parent.task}」的跟进子任务）"
+    # RAG 检索辅助（对 knowledge/concept/design 类型做检索）
+    rag_context = ""
+    task_type = task_node.task_type if task_node else "knowledge"
+    if task_type in ("knowledge", "concept", "design", "debug"):
+        try:
+            r = _rag.retrieve_rich(task_text)
+            chunks = r.get("knowledge", [])[:2]
+            if chunks:
+                rag_context = "\n".join(f"[{c['source']}] {c['text'][:200]}" for c in chunks)
+        except Exception:
+            pass
 
-    system = _INTERVIEWER_SYSTEM.format(
-        task=task.task + parent_hint,
-        task_type=task.task_type,
+    profile_section = f"候选人背景：\n{session.profile_text[:800]}\n" if session.profile_text else ""
+
+    if verdict is None:
+        # 首个问题
+        question_context = f"首问，话题开场（task_type={task_type}）"
+        user_msg = _INTERVIEWER_USR_INIT.format(task_text=task_text, rag_context=rag_context or "无")
+    else:
+        question_context = "deep_dive（深挖薄弱点）" if verdict == "deep_dive" else "continue（换角度追问）"
+        user_msg = _INTERVIEWER_USR_FOLLOWUP.format(
+            prev_question=parent_node.text,
+            prev_answer=parent_node.answer[:300],
+            feedback=score_feedback,
+            verdict=verdict,
+            rag_context=rag_context or "无",
+        )
+
+    system = _INTERVIEWER_SYS.format(
+        task_text=task_text,
+        question_context=question_context,
         profile_section=profile_section,
     )
-
-    # 工作消息 = 最近 8 条全程历史 + 本轮用户消息
-    working: list[dict] = list(session.history[-8:])
-    if user_message:
-        working.append({"role": "user", "content": user_message})
-    elif not working:
-        working.append({"role": "user", "content": "请开始考察，向候选人提出第一个问题。"})
-
-    topic_ended = False
-    final_answer = ""
-
-    for _step in range(_REACT_MAX_STEPS):
-        response = await _llm(working, system=system)
-
-        if "Final Answer:" in response:
-            final_answer = response.split("Final Answer:", 1)[1].strip()
-            break
-
-        action_m  = re.search(r"Action:\s*(.+?)(?:\n|$)", response, re.IGNORECASE)
-        input_m   = re.search(r"Action Input:\s*(.+?)(?:\n|$)", response, re.IGNORECASE)
-
-        if not action_m:
-            final_answer = response.strip()
-            break
-
-        action       = action_m.group(1).strip().lower()
-        action_input = input_m.group(1).strip() if input_m else ""
-
-        working.append({"role": "assistant", "content": response})
-
-        if "end_topic" in action:
-            topic_ended = True
-            # 让面试官给出一句过渡语
-            working.append({
-                "role": "user",
-                "content": (
-                    "Observation: 话题已结束，系统将转入评分。\n"
-                    "请在 Final Answer 中给候选人一句简短的过渡语（不要透露分数）。"
-                ),
-            })
-            closing = await _llm(working, system=system)
-            final_answer = (
-                closing.split("Final Answer:", 1)[1].strip()
-                if "Final Answer:" in closing
-                else closing.strip()
-            )
-            break
-
-        elif "rag_search" in action:
-            try:
-                result = _rag.retrieve_rich(action_input)
-                chunks = result.get("knowledge", [])[:3]
-                obs = (
-                    "检索到相关内容：\n" + "\n---\n".join(
-                        f"[{c['source']}] {c['text'][:300]}" for c in chunks
-                    )
-                    if chunks else "知识库中未找到相关内容。"
-                )
-            except Exception as e:
-                obs = f"检索失败: {e}"
-            working.append({"role": "user", "content": f"Observation: {obs}"})
-
-        else:
-            final_answer = response.strip()
-            break
-
-    if not final_answer:
-        final_answer = "请继续，我在听您的回答。"
-
-    return final_answer, topic_ended
+    q_text = await _llm([{"role": "user", "content": user_msg}], system=system)
+    return q_text.strip()
 
 
-# ── 完整话题轮次编排（供 main.py 调用） ──────────────────────────────────────
+# ── 核心编排 ──────────────────────────────────────────────────────────────────
 
-async def run_turn(session: InterviewSession, user_message: str) -> dict:
+def _add_question_node(
+    session: InterviewSession,
+    parent_node: ThoughtNode,
+    question_text: str,
+) -> ThoughtNode:
+    """在思维树上追加一个问题节点，更新 SM。"""
+    depth = parent_node.depth + 1
+    qnode = ThoughtNode(
+        id=str(uuid.uuid4()),
+        node_type="question",
+        text=question_text,
+        depth=depth,
+        status="asking",
+        parent_id=parent_node.id,
+    )
+    parent_node.children.append(qnode)
+    session.sm.current_node_id = qnode.id
+    return qnode
+
+
+async def start_interview(session: InterviewSession) -> str:
     """
-    处理一轮用户消息，驱动状态机前进，返回：
-    {
-      "response": str,           # 面试官回复
-      "topic_ended": bool,
-      "sm": dict,                # 状态机快照
-      "tasks": list,             # 最新任务树
-    }
-    如果 topic_ended，内部会自动完成 SCORING → DIRECTING，直到下一个 INTERVIEWING 或 DONE。
+    INIT → PLANNING → ASKING → ANSWERING。
+    返回面试官的开场问题文本。
     """
     sm = session.sm
-    assert sm.state == "INTERVIEWING", f"期望 INTERVIEWING，当前 {sm.state}"
+    assert sm.state == "INIT"
 
-    task = _find(session.tasks, sm.current_task_id)
-    if task is None:
-        raise RuntimeError("current_task_id 指向不存在的任务")
+    # PLANNING: Director 拆分任务
+    sm.transition("PLANNING")
+    await director_plan(session)
 
-    # 记录用户消息
-    if user_message:
-        session.history.append({"role": "user", "content": user_message})
-        session.topic_history.append({"role": "user", "content": user_message})
+    # 激活第一个根任务
+    first_task = session.roots[0]
+    first_task.status = "active"
+    sm.current_task_id = first_task.id
 
-    # 面试官回复
-    response_text, topic_ended = await interviewer_respond(session, task, user_message or None)
+    # ASKING: Interviewer 生成第一个问题
+    sm.transition("ASKING")
+    q_text = await interviewer_ask(session, parent_node=first_task, verdict=None)
+    qnode = _add_question_node(session, first_task, q_text)
+    qnode.status = "answering"
 
-    # 记录面试官回复
-    session.history.append({"role": "assistant", "content": response_text})
-    session.topic_history.append({"role": "assistant", "content": response_text})
+    # ANSWERING: 等待用户
+    sm.transition("ANSWERING")
 
-    if topic_ended:
-        # SCORING
-        sm.transition("SCORING", task_id=task.id)
-        score_result = await scorer_evaluate(task, session.topic_history)
-        sm.last_score = score_result
-        print(
-            f"[scorer] task='{task.task[:40]}' "
-            f"score={score_result['score']} feedback={score_result['feedback']}"
-        )
+    # 记录到全程历史
+    session.history.append({"role": "assistant", "content": q_text})
+    print(f"[interview/start] tasks={len(session.roots)} first_q={q_text[:60]}")
+    return q_text
 
-        # DIRECTING
-        sm.transition("DIRECTING", **score_result)
-        await director_decide(session, task.id)
-        # ↑ director_decide 会将 SM 转换到 INTERVIEWING(next) 或 DONE
 
-        # 重置本话题历史
-        session.topic_history = []
+async def run_turn(session: InterviewSession, user_answer: str) -> dict:
+    """
+    ANSWERING → SCORING → (ASKING | DIRECTING) → ANSWERING。
+    返回 {response, sm, tree}。
+    """
+    sm = session.sm
+    assert sm.state == "ANSWERING", f"期望 ANSWERING，当前 {sm.state}"
 
-        print(
-            f"[director] SM → {sm.state} "
-            f"current_task={sm.current_task_id}"
-        )
+    # 找当前问题节点
+    qnode = _find(session.roots, sm.current_node_id)
+    if qnode is None:
+        raise RuntimeError("current_node_id 指向不存在的节点")
 
-    return {
-        "response":    response_text,
-        "topic_ended": topic_ended,
-        "sm":          sm.to_dict(),
-        "tasks":       tasks_to_dict(session.tasks),
-    }
+    # 记录用户回答
+    qnode.answer = user_answer
+    qnode.status = "answered"
+    session.history.append({"role": "user", "content": user_answer})
+
+    # SCORING
+    sm.transition("SCORING")
+    score_result = await scorer_evaluate(session, qnode, user_answer)
+    qnode.score   = score_result["score"]
+    qnode.verdict = score_result["verdict"]
+    qnode.feedback = score_result["feedback"]
+    qnode.status  = "scored"
+    sm.last_score = score_result
+    print(f"[scorer] q='{qnode.text[:40]}' score={score_result['score']} verdict={score_result['verdict']}")
+
+    verdict = score_result["verdict"]
+
+    if verdict == "pass":
+        # 当前任务通过 → Director 推进
+        sm.transition("DIRECTING")
+        next_task = await director_advance(session)
+
+        if next_task is None:
+            sm.transition("DONE")
+            qnode.status = "done"
+            closing = "非常感谢你的参与，今天的面试到此结束！请稍等查看评分详情。"
+            session.history.append({"role": "assistant", "content": closing})
+            return {"response": closing, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}
+
+        # 下一任务首问
+        sm.transition("ASKING")
+        q_text = await interviewer_ask(session, parent_node=next_task, verdict=None)
+        new_q = _add_question_node(session, next_task, q_text)
+        new_q.status = "answering"
+        sm.transition("ANSWERING")
+
+    else:
+        # continue: 同层追问（挂在 qnode 的父节点下）
+        # deep_dive: 深挖（挂在 qnode 下）
+        parent = qnode if verdict == "deep_dive" else _find(session.roots, qnode.parent_id)
+        if parent is None:
+            parent = _find(session.roots, sm.current_task_id) or qnode
+
+        sm.transition("ASKING")
+        q_text = await interviewer_ask(session, parent_node=qnode, verdict=verdict,
+                                       score_feedback=score_result["feedback"])
+        new_q = _add_question_node(session, parent, q_text)
+        new_q.status = "answering"
+        sm.transition("ANSWERING")
+
+    qnode.status = "done"
+    session.history.append({"role": "assistant", "content": q_text})
+    print(f"[interviewer] next_q='{q_text[:60]}'")
+    return {"response": q_text, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}

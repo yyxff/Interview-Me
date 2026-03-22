@@ -2391,6 +2391,16 @@ body {
 .sm-score-num--mid  { color: var(--amber); }
 .sm-score-num--low  { color: var(--danger); }
 .sm-score-fb { color: var(--text-muted); line-height: 1.4; }
+.sm-verdict { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; }
+.sm-verdict--pass      { background: rgba(52,211,153,0.15); color: var(--green); }
+.sm-verdict--continue  { background: rgba(251,191,36,0.15); color: var(--amber); }
+.sm-verdict--deep_dive { background: rgba(239,68,68,0.15);  color: var(--danger); }
+
+/* Directing note in SM cycle */
+.sm-directing-note {
+  display: flex; align-items: center; gap: 4px;
+  padding: 2px 8px; font-size: 11px; color: var(--text-muted);
+}
 
 /* ===== Info Panel ===== */
 
@@ -2466,6 +2476,12 @@ body {
 .info-task-score--mid  { background: rgba(245,158,11,0.15); color: var(--amber); }
 .info-task-score--low  { background: rgba(239,68,68,0.15);  color: var(--danger); }
 .info-task-fb { font-size: 10px; color: var(--text-muted); margin-left: 16px; line-height: 1.4; }
+/* Task vs question node style */
+.info-task--task  > .info-task-row .info-task-text { font-weight: 600; }
+.info-task--question > .info-task-row .info-task-text { color: var(--text-muted); font-style: italic; }
+.info-task-verdict { font-size: 10px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; }
+.info-task-verdict--continue  { background: rgba(251,191,36,0.15); color: var(--amber); }
+.info-task-verdict--deep_dive { background: rgba(239,68,68,0.15);  color: var(--danger); }
 
 /* Chat */
 .info-chat {
