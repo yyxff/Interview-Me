@@ -26,10 +26,145 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 SESSIONS_DIR = Path(__file__).parent / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
+
+
+# ── ReAct 引擎 ────────────────────────────────────────────────────────────────
+
+_REACT_HEADER = """\
+你可以使用以下工具（最多 {max_steps} 次）：
+{tool_descs}
+
+每步格式（二选一）：
+① 使用工具：
+Thought: <推理过程>
+Action: <工具名>
+Action Input: <查询字符串>
+
+② 直接给出结果（不需要工具时）：
+Final Answer: <最终输出>
+
+工具结果会以 Observation: <结果> 形式返回。用完工具次数后必须给 Final Answer。
+"""
+
+_REACT_FORCE_FINAL = "你已用完工具调用次数，现在必须给出 Final Answer。"
+
+
+async def _react_loop(
+    init_system: str,
+    init_user: str,
+    tools: dict[str, Callable[[str], Awaitable[str]]],
+    max_steps: int = 3,
+    timeout_per_step: float = 40.0,
+) -> str:
+    """
+    通用 ReAct 循环。
+    init_system 应包含 _REACT_HEADER（调用方格式化好后传入）。
+    返回 Final Answer 的文本。
+    """
+    msgs: list[dict] = [{"role": "user", "content": init_user}]
+
+    for step in range(max_steps + 1):
+        if step == max_steps:
+            msgs.append({"role": "user", "content": _REACT_FORCE_FINAL})
+
+        raw = await asyncio.wait_for(_provider.chat(msgs, init_system), timeout_per_step)
+        msgs.append({"role": "assistant", "content": raw})
+
+        # 提取 Final Answer
+        if "Final Answer:" in raw:
+            return raw.split("Final Answer:", 1)[1].strip()
+
+        if step == max_steps:
+            return raw.strip()   # force fallback
+
+        # 提取 Action / Action Input
+        action_m = re.search(r"Action:\s*(\w+)", raw)
+        input_m  = re.search(r"Action Input:\s*[\"']?(.*?)[\"']?\s*$", raw, re.MULTILINE)
+        if not action_m:
+            return raw.strip()   # no action → treat as final
+
+        tool_name  = action_m.group(1).strip()
+        tool_input = input_m.group(1).strip() if input_m else ""
+
+        if tool_name in tools:
+            try:
+                observation = await asyncio.wait_for(tools[tool_name](tool_input), 20.0)
+            except Exception as e:
+                observation = f"工具调用失败: {e}"
+        else:
+            observation = f"未知工具: {tool_name}"
+
+        observation = observation[:600]
+        msgs.append({"role": "user", "content": f"Observation: {observation}"})
+        print(f"[react] step={step} tool={tool_name} obs={observation[:80]}")
+
+    return raw.strip()
+
+
+# ── ReAct 工具实现 ─────────────────────────────────────────────────────────────
+
+def _make_tools(session: InterviewSession) -> dict[str, dict]:
+    """
+    返回每个 agent 可用的工具集描述 + 可调用函数。
+    结构: {tool_name: {"desc": str, "fn": async fn(str)->str}}
+    """
+    import rag as _rag
+
+    async def search_knowledge(query: str) -> str:
+        r = _rag.retrieve_rich(query)
+        chunks = r.get("knowledge", [])[:3]
+        if not chunks:
+            return "知识库中未找到相关内容"
+        return "\n".join(f"[{c['source']} §{c.get('chapter','')}] {c['text'][:300]}" for c in chunks)
+
+    async def search_profile(query: str) -> str:
+        text = session.profile_text or ""
+        if not text:
+            return "未上传候选人简历"
+        # 简单关键词搜索
+        lines = [l for l in text.split("\n") if query.split()[0] in l or len(query.split()) > 1]
+        snippet = "\n".join(lines[:20]) if lines else text[:600]
+        return snippet[:600]
+
+    async def search_past_sessions(query: str) -> str:
+        files = sorted(SESSIONS_DIR.glob("*.json"), reverse=True)
+        results: list[str] = []
+        for f in files[:5]:
+            if session.session_id[:8] in f.name:
+                continue
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                weak = []
+                for node in _flat_dict(data.get("tree", [])):
+                    score = node.get("score")
+                    if score and score <= 2 and node.get("text"):
+                        text_blob = node["text"] + node.get("feedback", "")
+                        if any(kw in text_blob for kw in query.split()):
+                            weak.append(f"  Q: {node['text'][:80]} | {score}/5 | {node.get('feedback','')[:60]}")
+                if weak:
+                    results.append(f"[{data.get('saved_at',f.stem)}]:\n" + "\n".join(weak[:3]))
+            except Exception:
+                pass
+        return "\n\n".join(results) if results else "未找到相关历史薄弱点记录"
+
+    return {
+        "search_knowledge": {
+            "desc": "search_knowledge: 搜索技术知识库，了解某个技术点有哪些具体内容可以考察\n  用法：search_knowledge(\"MVCC binlog 原理\")",
+            "fn":   search_knowledge,
+        },
+        "search_profile": {
+            "desc": "search_profile: 在候选人简历中搜索相关技术经验\n  用法：search_profile(\"MySQL 项目\")",
+            "fn":   search_profile,
+        },
+        "search_past_sessions": {
+            "desc": "search_past_sessions: 搜索历史面试记录，找出候选人在某个话题上的薄弱点\n  用法：search_past_sessions(\"并发控制 锁\")",
+            "fn":   search_past_sessions,
+        },
+    }
 
 
 # ── 状态机 ────────────────────────────────────────────────────────────────────
@@ -209,23 +344,33 @@ _PLAN_SYS = """\
 每个任务是一道具体的面试题方向，不是宽泛话题。
 task_type 只能是: experience/knowledge/concept/design/debug/scenario
 
-输出 JSON 数组（只输出数组，不加代码块）：
-[{"task":"介绍你做过最有挑战的项目，重点讲技术难点","task_type":"experience"},...]"""
+你可以先搜索知识库/简历/历史记录，了解候选人背景和可考察内容，再制定计划。
+
+{react_header}
+
+Final Answer 必须是 JSON 数组（只输出数组，不加代码块）：
+[{{"task":"介绍你做过最有挑战的项目，重点讲技术难点","task_type":"experience"}},...]\
+"""
 
 _PLAN_USR = "候选人 Profile：\n{profile}\n\n岗位 JD：\n{jd}\n\n考察方向：\n{direction}"
 
 
 async def director_plan(session: InterviewSession) -> None:
-    """PLANNING 阶段：创建根任务节点。"""
+    """PLANNING 阶段：ReAct → 创建根任务节点。"""
     assert session.sm.state == "PLANNING"
-    text = await _llm(
-        [{"role": "user", "content": _PLAN_USR.format(
-            profile=(session.profile_text or "（未提供）")[:2000],
-            jd=(session.jd or "（未指定）")[:1000],
-            direction=(session.direction or "（未指定）"),
-        )}],
-        system=_PLAN_SYS,
+    tools   = _make_tools(session)
+    tool_fns = {n: t["fn"] for n, t in tools.items()}
+    tool_descs = "\n".join(t["desc"] for t in tools.values())
+    react_header = _REACT_HEADER.format(max_steps=3, tool_descs=tool_descs)
+
+    system = _PLAN_SYS.format(react_header=react_header)
+    user   = _PLAN_USR.format(
+        profile=(session.profile_text or "（未提供）")[:2000],
+        jd=(session.jd or "（未指定）")[:1000],
+        direction=(session.direction or "（未指定）"),
     )
+    text = await _react_loop(system, user, tool_fns, max_steps=3, timeout_per_step=50.0)
+
     raw = _parse_json(text, default=[])
     roots: list[ThoughtNode] = []
     for item in (raw if isinstance(raw, list) else [])[:6]:
@@ -236,6 +381,7 @@ async def director_plan(session: InterviewSession) -> None:
     if not roots:
         roots = [ThoughtNode(id=str(uuid.uuid4()), node_type="task", text="介绍你的项目经历")]
     session.roots = roots
+    print(f"[director_plan] tasks={len(roots)}")
 
 
 async def director_advance(session: InterviewSession) -> ThoughtNode | None:
@@ -440,23 +586,22 @@ _INTERVIEWER_SYS = """\
 
 {profile_section}
 规则：
-- 输出 JSON，包含出题意图和问题本身
 - 问题要有针对性，不重复之前问过的问题
 - 语气自然专业，问题长度 1-2 句话
+- 如需了解具体知识点细节（如某算法原理、某机制实现），可先搜索知识库
 
-输出 JSON（不加代码块）：
+{react_header}
+
+Final Answer 必须是 JSON（不加代码块）：
 {{"intent": "考察候选人是否理解进程隔离的底层机制", "question": "进程之间为什么需要隔离内存？操作系统是怎么实现的？"}}"""
 
 _INTERVIEWER_USR_INIT = """\
-这是对话的开始，请提出关于「{task_text}」的第一个问题。
-参考知识（可选）：{rag_context}"""
+这是对话的开始，请提出关于「{task_text}」的第一个问题。"""
 
 _INTERVIEWER_USR_FOLLOWUP = """\
 上一个问题：{prev_question}
 候选人的回答：{prev_answer}
-导演指示：{director_focus}
-
-参考知识（可选）：{rag_context}"""
+导演指示：{director_focus}"""
 
 _REFLECT_SYS = """\
 你是一位严格的面试质量审核员。检查下面这道面试题是否合格：
@@ -480,47 +625,42 @@ async def interviewer_ask(
     is_first: bool = False,
 ) -> tuple[str, str]:
     """
-    ASKING 阶段：生成面试问题 + self-reflection。
+    ASKING 阶段：ReAct 生成面试问题 + self-reflection。
     返回 (question_text, intent)。
     """
     assert session.sm.state == "ASKING"
-    import rag as _rag
 
     task_node = _find(session.roots, session.sm.current_task_id)
     task_text = task_node.text if task_node else "（未知）"
     task_type = task_node.task_type if task_node else "knowledge"
 
-    # RAG 检索（knowledge/concept/design/debug 类型）
-    rag_context = ""
-    if task_type in ("knowledge", "concept", "design", "debug"):
-        try:
-            r = _rag.retrieve_rich(task_text)
-            chunks = r.get("knowledge", [])[:2]
-            if chunks:
-                rag_context = "\n".join(f"[{c['source']}] {c['text'][:200]}" for c in chunks)
-        except Exception:
-            pass
-
     profile_section = f"候选人背景：\n{session.profile_text[:800]}\n" if session.profile_text else ""
+
+    # 面试官只用 search_knowledge 工具
+    tools = _make_tools(session)
+    sk = tools["search_knowledge"]
+    tool_fns  = {"search_knowledge": sk["fn"]}
+    tool_descs = sk["desc"]
+    react_header = _REACT_HEADER.format(max_steps=2, tool_descs=tool_descs)
 
     if is_first:
         question_context = f"首问，话题开场（task_type={task_type}）"
-        user_msg = _INTERVIEWER_USR_INIT.format(task_text=task_text, rag_context=rag_context or "无")
+        user_msg = _INTERVIEWER_USR_INIT.format(task_text=task_text)
     else:
         question_context = f"追问/转向（导演指示：{director_focus or '无'}）"
         user_msg = _INTERVIEWER_USR_FOLLOWUP.format(
             prev_question=parent_node.text,
             prev_answer=parent_node.answer[:300],
             director_focus=director_focus or "根据上下文自行判断",
-            rag_context=rag_context or "无",
         )
 
     system = _INTERVIEWER_SYS.format(
         task_text=task_text,
         question_context=question_context,
         profile_section=profile_section,
+        react_header=react_header,
     )
-    raw = await _llm([{"role": "user", "content": user_msg}], system=system)
+    raw = await _react_loop(system, user_msg, tool_fns, max_steps=2, timeout_per_step=40.0)
     parsed = _parse_json(raw, default={"intent": "", "question": raw.strip()})
     intent   = parsed.get("intent", "")
     draft_q  = parsed.get("question", raw.strip()).strip()
