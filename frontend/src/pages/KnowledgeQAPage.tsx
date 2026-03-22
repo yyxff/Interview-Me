@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import ForceGraph3D from '3d-force-graph';
 
@@ -74,6 +74,92 @@ interface QAMessage {
   sources?:        Source[];
   graph?:          GraphData;
   rewritten_query?: string;
+}
+
+// ── Forked conversation tree ───────────────────────────────────────────────────
+
+interface ConvNode {
+  id:       string;
+  parentId: string | null;
+  question: QAMessage;
+  answer:   QAMessage;
+  childIds: string[];
+}
+
+function getPath(nodes: Record<string, ConvNode>, leafId: string | null): ConvNode[] {
+  const path: ConvNode[] = [];
+  let cur: string | null = leafId;
+  while (cur) {
+    const n = nodes[cur];
+    if (!n) break;
+    path.unshift(n);
+    cur = n.parentId;
+  }
+  return path;
+}
+
+function ConvTree({ nodes, rootIds, currentId, loading, onSelect, onNewRoot }: {
+  nodes:     Record<string, ConvNode>;
+  rootIds:   string[];
+  currentId: string | null;
+  loading:   boolean;
+  onSelect:  (id: string) => void;
+  onNewRoot: () => void;
+}) {
+  const [open, setOpen] = useState(true);
+
+  const activePath = useMemo(() => {
+    const set = new Set<string>();
+    let cur: string | null = currentId;
+    while (cur) { set.add(cur); cur = nodes[cur]?.parentId ?? null; }
+    return set;
+  }, [nodes, currentId]);
+
+  const renderNode = (id: string, depth = 0): React.ReactNode => {
+    const n = nodes[id];
+    if (!n) return null;
+    const isOnPath = activePath.has(id);
+    const isCurrent = id === currentId;
+    const label = n.question.content.length > 22
+      ? n.question.content.slice(0, 22) + '…'
+      : n.question.content;
+    return (
+      <div key={id}>
+        <div
+          className={`ctree-node${isOnPath ? ' ctree-node--path' : ''}${isCurrent ? ' ctree-node--current' : ''}`}
+          style={{ paddingLeft: 6 + depth * 12 }}
+          onClick={() => !loading && onSelect(id)}
+          title={n.question.content}
+        >
+          <span className="ctree-dot" />
+          <span className="ctree-label">{label}</span>
+          {n.childIds.length > 1 && (
+            <span className="ctree-fork-badge">{n.childIds.length}</span>
+          )}
+        </div>
+        {n.childIds.map(cid => renderNode(cid, depth + 1))}
+      </div>
+    );
+  };
+
+  if (rootIds.length === 0) return null;
+
+  return (
+    <div className="ctree-panel">
+      <div className="ctree-header">
+        <span className="ctree-title" onClick={() => setOpen(o => !o)}>
+          {open ? '▾' : '▸'} 对话树
+          <span className="ctree-count">{Object.keys(nodes).length}</span>
+        </span>
+        <button className="ctree-new-btn" title="新对话（从根开始）" onClick={onNewRoot}>＋</button>
+      </div>
+      {open && (
+        <div className="ctree-body">
+          {rootIds.map(id => renderNode(id))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface Note {
@@ -950,31 +1036,47 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function KnowledgeQAPage() {
-  const [messages, setMessages]       = useState<QAMessage[]>([]);
+  // ── Forked conversation tree state ──────────────────────────────────────────
+  const [nodes, setNodes]         = useState<Record<string, ConvNode>>({});
+  const [rootIds, setRootIds]     = useState<string[]>([]);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const nodesRef    = useRef<Record<string, ConvNode>>({});
+  const currentIdRef = useRef<string | null>(null);
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+
+  // Derived: messages to display = path from root to currentId
+  const pathMessages = useMemo(() => {
+    const path = getPath(nodes, currentId);
+    return path.flatMap(n => [n.question, n.answer]);
+  }, [nodes, currentId]);
+
+  // ── Other state ─────────────────────────────────────────────────────────────
   const [input, setInput]             = useState('');
   const [loading, setLoading]         = useState(false);
-  const [viewer, setViewer]             = useState<Source | null>(null);
+  const [viewer, setViewer]           = useState<Source | null>(null);
   const [showFullGraph, setShowFullGraph] = useState(false);
-  const [summarizing, setSummarizing]   = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
   const [notes, setNotes]             = useState<Note[]>([]);
-  const historyRef = useRef<{ role: string; content: string }[]>([]);
-  const bottomRef    = useRef<HTMLDivElement>(null);
-  const messagesRef  = useRef<HTMLDivElement>(null);
-  const atBottomRef  = useRef(true);
+  const bottomRef   = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true);
 
-  // track whether user is near the bottom
   const handleScroll = useCallback(() => {
     const el = messagesRef.current;
     if (!el) return;
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   }, []);
 
-  // only auto-scroll when already at bottom
   useEffect(() => {
-    if (atBottomRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
+    if (atBottomRef.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [pathMessages]);
+
+  // Scroll to bottom whenever we switch branches
+  const handleSelectNode = useCallback((id: string) => {
+    setCurrentId(id);
+    currentIdRef.current = id;
+    atBottomRef.current = true;
+  }, []);
 
   const fetchNotes = useCallback(async () => {
     try {
@@ -986,25 +1088,46 @@ export default function KnowledgeQAPage() {
 
   useEffect(() => { fetchNotes(); }, [fetchNotes]);
 
+  // ── Submit: create a new ConvNode as child of currentId ─────────────────────
   const submit = async () => {
     const question = input.trim();
     if (!question || loading) return;
     setInput('');
 
-    const userMsg: QAMessage = { id: `u-${Date.now()}`, role: 'user', content: question };
-    setMessages((prev) => [...prev, userMsg]);
-    const aId = `a-${Date.now()}`;
-    setMessages((prev) => [...prev, { id: aId, role: 'assistant', content: '', sources: [] }]);
-    // force-scroll to bottom when user submits a new question
+    // History = current branch path (for LLM context), capped at 12 messages
+    const currentPath = getPath(nodesRef.current, currentIdRef.current);
+    const history = currentPath.flatMap(n => [
+      { role: 'user',      content: n.question.content },
+      { role: 'assistant', content: n.answer.content   },
+    ]).slice(-12);
+
+    // Create the new node
+    const nodeId   = `n-${Date.now()}`;
+    const parentId = currentIdRef.current;
+    const qMsg: QAMessage = { id: `u-${nodeId}`, role: 'user',      content: question };
+    const aMsg: QAMessage = { id: `a-${nodeId}`, role: 'assistant', content: '', sources: [] };
+    const newNode: ConvNode = { id: nodeId, parentId, question: qMsg, answer: aMsg, childIds: [] };
+
+    setNodes(prev => {
+      const next = { ...prev, [nodeId]: newNode };
+      if (parentId && next[parentId]) {
+        next[parentId] = { ...next[parentId], childIds: [...next[parentId].childIds, nodeId] };
+      }
+      nodesRef.current = next;
+      return next;
+    });
+    if (!parentId) setRootIds(prev => [...prev, nodeId]);
+    setCurrentId(nodeId);
+    currentIdRef.current = nodeId;
     atBottomRef.current = true;
     setLoading(true);
 
-    const history = historyRef.current.slice(-12);
+    // Stream answer
     try {
       const res = await fetch(`${API_BASE}/qa/stream`, {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: question, history }),
+        body:    JSON.stringify({ message: question, history }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -1020,37 +1143,61 @@ export default function KnowledgeQAPage() {
         buffer = lines.pop() ?? '';
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') continue;
           try {
-            const payload = JSON.parse(data);
+            const payload = JSON.parse(raw);
             if (payload.sources) {
-              setMessages((prev) => prev.map((m) => m.id === aId
-                ? { ...m, sources: payload.sources, rewritten_query: payload.rewritten_query }
-                : m));
+              setNodes(prev => {
+                const next = { ...prev, [nodeId]: { ...prev[nodeId],
+                  answer: { ...prev[nodeId].answer, sources: payload.sources, rewritten_query: payload.rewritten_query },
+                }};
+                nodesRef.current = next;
+                return next;
+              });
             } else if (payload.graph) {
-              setMessages((prev) => prev.map((m) => m.id === aId ? { ...m, graph: payload.graph } : m));
+              setNodes(prev => {
+                const next = { ...prev, [nodeId]: { ...prev[nodeId],
+                  answer: { ...prev[nodeId].answer, graph: payload.graph },
+                }};
+                nodesRef.current = next;
+                return next;
+              });
             } else if (payload.text) {
               fullText += payload.text;
-              setMessages((prev) => prev.map((m) => m.id === aId ? { ...m, content: fullText } : m));
+              setNodes(prev => {
+                const next = { ...prev, [nodeId]: { ...prev[nodeId],
+                  answer: { ...prev[nodeId].answer, content: fullText },
+                }};
+                nodesRef.current = next;
+                return next;
+              });
             }
           } catch { /* ignore */ }
         }
       }
-      historyRef.current = [...history,
-        { role: 'user',      content: question  },
-        { role: 'assistant', content: fullText  },
-      ];
     } catch {
-      setMessages((prev) => prev.map((m) => m.id === aId
-        ? { ...m, content: '请求失败，请检查后端是否运行' } : m));
+      setNodes(prev => {
+        const next = { ...prev, [nodeId]: { ...prev[nodeId],
+          answer: { ...prev[nodeId].answer, content: '请求失败，请检查后端是否运行' },
+        }};
+        nodesRef.current = next;
+        return next;
+      });
     } finally {
       setLoading(false);
     }
   };
 
+  // ── Summarize: only current branch path ─────────────────────────────────────
   const handleSummarize = () => {
-    if (messages.length === 0 || summarizing) return;
+    const path = getPath(nodesRef.current, currentIdRef.current);
+    const msgs = path.flatMap(n => [
+      n.question.content ? { role: 'user',      content: n.question.content } : null,
+      n.answer.content   ? { role: 'assistant', content: n.answer.content   } : null,
+    ]).filter(Boolean) as { role: string; content: string }[];
+
+    if (msgs.length === 0 || summarizing) return;
     setSummarizing(true);
 
     const tempId = `temp_${Date.now()}`;
@@ -1062,23 +1209,19 @@ export default function KnowledgeQAPage() {
       indexing:   true,
     }, ...prev]);
 
-    const msgs = messages
-      .filter((m) => m.content)
-      .map((m) => ({ role: m.role, content: m.content }));
-
     (async () => {
       try {
         const sumRes = await fetch(`${API_BASE}/qa/summarize`, {
-          method: 'POST',
+          method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: msgs }),
+          body:    JSON.stringify({ messages: msgs }),
         });
         const { title, content, questions = [] } = await sumRes.json();
 
         const saveRes = await fetch(`${API_BASE}/notes/save`, {
-          method: 'POST',
+          method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title, content, questions }),
+          body:    JSON.stringify({ title, content, questions }),
         });
         const data = await saveRes.json();
 
@@ -1098,23 +1241,38 @@ export default function KnowledgeQAPage() {
   const handleIndexNote = async (note_id: string) => {
     const res = await fetch(`${API_BASE}/notes/${note_id}/index`, { method: 'POST' });
     if (!res.ok) throw new Error('index failed');
-    // 乐观更新：标记为已索引（后台线程完成后真正生效）
     setNotes((prev) => prev.map((n) => n.note_id === note_id ? { ...n, indexed: true } : n));
   };
+
+  const hasBranch = currentId != null && (nodesRef.current[currentId]?.childIds.length ?? 0) > 0;
 
   return (
     <div className="kqa-page">
       <KnowledgeSidebar indexedNotes={notes.filter((n) => n.indexed && !n.indexing)} />
 
       <div className="qa-main">
+        {/* Conversation tree — floating panel top-right */}
+        <ConvTree
+          nodes={nodes}
+          rootIds={rootIds}
+          currentId={currentId}
+          loading={loading}
+          onSelect={handleSelectNode}
+          onNewRoot={() => { setCurrentId(null); currentIdRef.current = null; }}
+        />
+
         <div className="qa-messages" ref={messagesRef} onScroll={handleScroll}>
-          {messages.length === 0 && (
+          {pathMessages.length === 0 && (
             <div className="qa-empty">
               <p className="qa-empty-title">知识库问答</p>
-              <p className="qa-empty-hint">问题会检索知识库，将相关内容送入 AI 上下文后回答</p>
+              <p className="qa-empty-hint">
+                {rootIds.length > 0
+                  ? '点击左侧树节点切换分支，或在下方输入新问题开始新对话'
+                  : '问题会检索知识库，将相关内容送入 AI 上下文后回答'}
+              </p>
             </div>
           )}
-          {messages.map((msg) => (
+          {pathMessages.map((msg) => (
             <div key={msg.id} className={`qa-msg qa-msg--${msg.role}`}>
               <div className="qa-msg-label">{msg.role === 'user' ? '你' : 'AI'}</div>
               {msg.role === 'assistant' && msg.rewritten_query && (
@@ -1153,12 +1311,17 @@ export default function KnowledgeQAPage() {
         </div>
 
         <div className="qa-input-bar">
+          {hasBranch && (
+            <span className="qa-branch-tip" title="当前节点已有子分支，继续输入将创建新分支">
+              ⑂ 分叉
+            </span>
+          )}
           <input
             className="qa-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
-            placeholder="输入问题…"
+            placeholder={currentId ? '继续提问，或在树中选择其他节点切换分支…' : '输入问题…'}
             disabled={loading}
           />
           <button
@@ -1169,8 +1332,8 @@ export default function KnowledgeQAPage() {
           <button
             className="btn btn--icon"
             onClick={handleSummarize}
-            disabled={summarizing || messages.length === 0}
-            title="总结本次对话为知识点"
+            disabled={summarizing || pathMessages.length === 0}
+            title="总结当前分支对话为知识点"
           >
             {summarizing ? '…' : '✦'}
           </button>
