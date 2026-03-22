@@ -28,6 +28,7 @@ interface ThoughtNode {
   director_note:   string;
   question_intent: string;
   task_type:       string;
+  summary:         string;
   children:        ThoughtNode[];
 }
 
@@ -100,29 +101,42 @@ function TreeView({ roots }: { roots: ThoughtNode[] }) {
             </span>
           )}
         </div>
-        {/* 🎙 面试官出题意图 */}
-        {node.question_intent && !isTask && node.status !== 'planned' && (
-          <div className="rv-node-attr rv-node-attr--interviewer">🎙 {node.question_intent}</div>
+        {/* 面试官：出题意图 */}
+        {node.question_intent && !isTask && node.status !== 'planned' && node.status !== 'skipped' && (
+          <div className="rv-node-attr rv-node-attr--interviewer">
+            <span className="rv-attr-label">面试官</span> {node.question_intent}
+          </div>
         )}
-        {/* planned 节点 */}
-        {node.status === 'planned' && (
-          <div className="rv-node-attr rv-node-attr--planned">🎬 待问：{node.question_intent}</div>
+        {/* 待问 / 已跳过 */}
+        {(node.status === 'planned' || node.status === 'skipped') && (
+          <div className={`rv-node-attr rv-node-attr--${node.status}`}>
+            <span className="rv-attr-label">{node.status === 'skipped' ? '已跳过' : '待问'}</span>
+            {node.question_intent}
+          </div>
         )}
         {/* 候选人回答 */}
         {node.answer && !isTask && (
-          <div className="rv-node-answer">{node.answer}</div>
+          <div className="rv-node-answer">
+            <span className="rv-attr-label">候选人</span> {node.answer}
+          </div>
         )}
-        {/* 📊 评分员 CoT 分析 */}
+        {/* 评分员：CoT 分析 */}
         {node.reasoning && (
-          <div className="rv-node-attr rv-node-attr--scorer">📊 {node.reasoning}</div>
+          <div className="rv-node-attr rv-node-attr--scorer">
+            <span className="rv-attr-label">评分员</span> {node.reasoning}
+          </div>
         )}
-        {/* 📊 评分反馈（简短） */}
+        {/* 评分员：简要反馈 */}
         {node.feedback && (
-          <div className="rv-node-attr rv-node-attr--feedback">└ {node.feedback}</div>
+          <div className="rv-node-attr rv-node-attr--feedback">
+            <span className="rv-attr-label">反馈</span> {node.feedback}
+          </div>
         )}
-        {/* 🎬 导演决策理由 */}
+        {/* 导演：决策理由 */}
         {node.director_note && node.verdict && (
-          <div className="rv-node-attr rv-node-attr--director">🎬 {verdictLabel(node.verdict)} — {node.director_note}</div>
+          <div className="rv-node-attr rv-node-attr--director">
+            <span className="rv-attr-label">导演 {verdictLabel(node.verdict)}</span> {node.director_note}
+          </div>
         )}
         {!isCollapsed && node.children.map(c => renderNode(c, indent + 1))}
       </div>

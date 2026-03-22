@@ -2667,6 +2667,8 @@ body {
 .rv-node-attr--feedback    { color: var(--text-muted); padding-left: 8px; }
 .rv-node-attr--director    { color: var(--amber); font-style: italic; }
 .rv-node-attr--planned     { color: var(--primary); opacity: 0.6; font-style: italic; }
+.rv-node-attr--skipped     { color: var(--text-muted); opacity: 0.45; font-style: italic; text-decoration: line-through; }
+.rv-attr-label             { font-weight: 600; margin-right: 4px; font-style: normal; }
 
 /* InfoPanel attribution lines */
 .info-task-attr { font-size: 10px; line-height: 1.4; margin-left: 26px; }

@@ -289,12 +289,15 @@ _PLAN_SYS = """\
 每个任务是一道具体的面试题方向，不是宽泛话题。
 task_type 只能是: experience/knowledge/concept/design/debug/scenario
 
+对每个任务，你可以在 sub_questions 中预规划 1-3 个具体子问题方向（考察角度）。
+面试时面试官会依次展开这些角度，未回答完的子问题随时可修改。
+
 你可以先搜索知识库/简历/历史记录，了解候选人背景和可考察内容，再制定计划。
 
 {react_header}
 
 Final Answer 必须是 JSON 数组（只输出数组，不加代码块）：
-[{{"task":"介绍你做过最有挑战的项目，重点讲技术难点","task_type":"experience"}},...]\
+[{{"task":"介绍你做过最有挑战的项目","task_type":"experience","sub_questions":["项目背景和解决的问题","你的具体职责和贡献","遇到的最大技术挑战"]}},...]\
 """
 
 _PLAN_USR = "候选人 Profile：\n{profile}\n\n岗位 JD：\n{jd}\n\n考察方向：\n{direction}"
@@ -321,20 +324,36 @@ async def director_plan(session: InterviewSession) -> None:
     roots: list[ThoughtNode] = []
     for item in (raw if isinstance(raw, list) else [])[:6]:
         t = item.get("task", "").strip() if isinstance(item, dict) else ""
-        if t:
-            roots.append(ThoughtNode(id=str(uuid.uuid4()), node_type="task",
-                                     text=t, task_type=item.get("task_type", "knowledge")))
+        if not t:
+            continue
+        task_node = ThoughtNode(
+            id=str(uuid.uuid4()), node_type="task",
+            text=t, task_type=item.get("task_type", "knowledge"),
+        )
+        # 预埋子问题（导演在规划阶段的 fork）
+        sub_qs = [q.strip() for q in item.get("sub_questions", []) if isinstance(q, str) and q.strip()]
+        _add_planned_nodes(None, task_node, sub_qs)   # parent_node=task_node
+        roots.append(task_node)
     if not roots:
         roots = [ThoughtNode(id=str(uuid.uuid4()), node_type="task", text="介绍你的项目经历")]
     session.roots = roots
-    print(f"[director_plan] tasks={len(roots)}")
+    print(f"[director_plan] tasks={len(roots)} planned_per_task={[len(r.children) for r in roots]}")
+
+
+def _skip_planned_descendants(node: ThoughtNode) -> None:
+    """将节点下所有 planned 后代标为 skipped（任务推进时清理未执行的计划）。"""
+    for n in _flat([node]):
+        if n.id != node.id and n.status == "planned":
+            n.status = "skipped"
+            print(f"[skip] planned node skipped: '{n.question_intent[:50]}'")
 
 
 async def director_advance(session: InterviewSession) -> ThoughtNode | None:
-    """DIRECTING 阶段：标记当前任务完成，返回下一个待处理任务（None=全部完成）。"""
+    """DIRECTING 阶段：标记当前任务完成（清理残留 planned），返回下一个待处理任务。"""
     assert session.sm.state == "DIRECTING"
     cur = _find(session.roots, session.sm.current_task_id)
     if cur:
+        _skip_planned_descendants(cur)   # 完成约束：跳过未问的计划节点
         cur.status = "done"
     nxt = _next_pending_task(session.roots)
     if nxt:
@@ -595,7 +614,7 @@ def _next_planned_sibling(session: InterviewSession, node: ThoughtNode) -> Thoug
 
 
 def _add_planned_nodes(
-    session: InterviewSession,
+    _session_unused: Any,
     parent_node: ThoughtNode,
     focuses: list[str],
 ) -> list[ThoughtNode]:
@@ -826,28 +845,37 @@ async def run_turn(session: InterviewSession, user_answer: str) -> dict:
     sm.last_score   = score_result
     print(f"[scorer] q='{qnode.text[:40]}' score={score_result['score']}")
 
-    # ── DIRECTING：导演决策 ────────────────────────────────────────────────────
+    # ── DIRECTING ────────────────────────────────────────────────────────────
     sm.transition("DIRECTING")
+    task_node = _find(session.roots, sm.current_task_id)
 
-    # 先检查是否有已规划的 planned 兄弟节点（上轮导演的计划）
+    # ── 优先执行已规划的 planned 兄弟节点（导演上轮的承诺必须兑现）─────────────
     planned_next = _next_planned_sibling(session, qnode)
+    if planned_next:
+        sm.transition("ASKING")
+        q_text, intent = await interviewer_ask(
+            session, parent_node=qnode, director_focus=planned_next.question_intent,
+        )
+        planned_next.text            = q_text
+        planned_next.question_intent = intent
+        planned_next.status          = "answering"
+        session.sm.current_node_id   = planned_next.id
+        sm.transition("ANSWERING")
+        qnode.status = "done"
+        session.history.append({"role": "assistant", "content": q_text})
+        print(f"[planned] '{planned_next.question_intent[:50]}' → '{q_text[:60]}'")
+        return {"response": q_text, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}
 
+    # ── 无 planned 节点，才交给导演决策 ──────────────────────────────────────
     director_result = await director_decide(session, qnode, score_result)
     decision        = director_result["decision"]
     sub_questions   = director_result["sub_questions"]
     qnode.verdict       = decision
     qnode.director_note = director_result["reasoning"]
 
-    task_node = _find(session.roots, sm.current_task_id)
-
-    # ── 根据决策确定 plan_parent 和 next_focus ──────────────────────────────
-
     if decision == "pass":
-        # Rollup：对刚完成的任务生成摘要，供后续面试官参考
         if task_node:
             await rollup_node(task_node)
-
-        # 即使有 planned 兄弟，pass 意味着任务足够了，直接推进
         next_task = await director_advance(session)
         if next_task is None:
             sm.transition("DONE")
@@ -861,7 +889,7 @@ async def run_turn(session: InterviewSession, user_answer: str) -> dict:
         new_q = _add_question_node(session, next_task, q_text, intent=intent)
 
     else:
-        # 确定挂载父节点
+        # 确定新问题挂载的父节点
         if decision == "deepen":
             plan_parent = qnode
         elif decision == "pivot":
@@ -869,47 +897,30 @@ async def run_turn(session: InterviewSession, user_answer: str) -> dict:
         elif decision == "back_up":
             gp = _find(session.roots, qnode.parent_id)
             plan_parent = (_find(session.roots, gp.parent_id) if gp and gp.parent_id else gp) or task_node or qnode
-            # Rollup：对正在退出的子树生成摘要
             if gp:
                 await rollup_node(gp)
         else:
-            plan_parent = qnode  # fallback
+            plan_parent = qnode
 
-        if planned_next and decision != "deepen":
-            # 如果已有计划且本次不是新的 deepen，优先执行已有计划
-            target = planned_next
-        else:
-            # 批量规划：把 sub_questions[1:] 注册为 planned，先问第一个
-            if len(sub_questions) > 1:
-                _add_planned_nodes(session, plan_parent, sub_questions[1:])
-            first_focus = sub_questions[0] if sub_questions else director_result.get("reasoning", "")
-            # 生成并填充第一个问题
-            sm.transition("ASKING")
-            q_text, intent = await interviewer_ask(
-                session, parent_node=qnode, director_focus=first_focus,
-            )
-            new_q = _add_question_node(session, plan_parent, q_text, intent=intent)
-            new_q.status = "answering"
-            sm.transition("ANSWERING")
-            qnode.status = "done"
-            session.history.append({"role": "assistant", "content": q_text})
-            print(f"[interviewer] decision={decision} plan_size={len(sub_questions)} next_q='{q_text[:60]}'")
-            return {"response": q_text, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}
-
-        # 执行已有 planned 节点：面试官把 planned 变为真正的问题
+        # 批量注册剩余子问题为 planned，立刻问第一个
+        if len(sub_questions) > 1:
+            _add_planned_nodes(session, plan_parent, sub_questions[1:])
+        first_focus = sub_questions[0] if sub_questions else director_result.get("reasoning", "")
         sm.transition("ASKING")
         q_text, intent = await interviewer_ask(
-            session, parent_node=qnode, director_focus=target.question_intent,
+            session, parent_node=qnode, director_focus=first_focus,
         )
-        target.text            = q_text
-        target.question_intent = intent
-        target.status          = "answering"
-        session.sm.current_node_id = target.id
-        new_q = target
+        new_q = _add_question_node(session, plan_parent, q_text, intent=intent)
+        new_q.status = "answering"
+        sm.transition("ANSWERING")
+        qnode.status = "done"
+        session.history.append({"role": "assistant", "content": q_text})
+        print(f"[director] {decision} plan={len(sub_questions)} next_q='{q_text[:60]}'")
+        return {"response": q_text, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}
 
     new_q.status = "answering"
     sm.transition("ANSWERING")
     qnode.status = "done"
     session.history.append({"role": "assistant", "content": q_text})
-    print(f"[interviewer] decision={decision} next_q='{q_text[:60]}'")
+    print(f"[director] {decision} next_q='{q_text[:60]}'")
     return {"response": q_text, "sm": sm.to_dict(), "tree": tree_to_dict(session.roots)}
