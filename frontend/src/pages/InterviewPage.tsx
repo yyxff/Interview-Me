@@ -337,6 +337,18 @@ export default function InterviewPage() {
   });
   useEffect(() => { ttsActionsRef.current = { speak, cancel: cancelSpeak }; }, [speak, cancelSpeak]);
 
+  // ── Save session ──────────────────────────────────────────────────────────────
+
+  const saveSession = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    try {
+      const res = await fetch(`${API_BASE}/interview/session/${sid}/save`, { method: 'POST' });
+      const data = await res.json();
+      if (data.filename) setResultFile(data.filename);
+    } catch { /* ignore */ }
+  }, []);
+
   // ── Submit turn ───────────────────────────────────────────────────────────────
 
   const submitTurn = useCallback(async (text: string) => {
@@ -391,11 +403,8 @@ export default function InterviewPage() {
                   scorer:      { state: 'done', note: '评分完成' },
                   interviewer: { state: 'done', note: '面试结束' },
                 });
-                // 获取最新保存的结果文件名
-                fetch(`${API_BASE}/interview/results`)
-                  .then(r => r.json())
-                  .then(d => { if (d.results?.length) setResultFile(d.results[0]); })
-                  .catch(() => {});
+                // 保存结果并获取文件名
+                saveSession();
               } else if (newSm.state === 'ANSWERING' && newSm.last_score) {
                 const ls = newSm.last_score;
                 setAgentStatus(s => ({
@@ -417,7 +426,7 @@ export default function InterviewPage() {
       setState('listening');
       setAgentStatus(s => ({ ...s, interviewer: { state: 'idle', note: '出错' }, scorer: { state: 'idle', note: '待机' } }));
     }
-  }, []);
+  }, [saveSession]);
 
   // ── Voice ─────────────────────────────────────────────────────────────────────
 
@@ -479,12 +488,13 @@ export default function InterviewPage() {
     }
   }, [startRecognition]);
 
-  const handleStop = useCallback(() => {
+  const handleStop = useCallback(async () => {
     setIsStarted(false); setState('idle'); stopRecognition();
     ttsActionsRef.current.cancel();
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     accumulatedRef.current = ''; setInterimTranscript('');
-  }, [stopRecognition]);
+    await saveSession();
+  }, [stopRecognition, saveSession]);
 
   const handleReset = useCallback(() => {
     setIsStarted(false); setState('idle'); setSessionId(null);
@@ -503,6 +513,11 @@ export default function InterviewPage() {
       <div className="interview-topbar">
         <StatusBadge state={state} />
         <div className="interview-topbar-actions">
+          {isStarted && (
+            <button className="btn btn--ghost btn--sm" onClick={saveSession} title="保存当前思维树">
+              保存
+            </button>
+          )}
           {isStarted && !isDone && (
             <button className="btn btn--danger btn--sm" onClick={handleStop}>结束面试</button>
           )}

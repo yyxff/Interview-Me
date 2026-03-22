@@ -917,6 +917,16 @@ async def interview_start(req: StartInterviewRequest):
     }
 
 
+@app.post("/interview/session/{session_id}/save")
+def interview_session_save(session_id: str):
+    """手动保存（或重新保存）面试结果，返回文件名。"""
+    s = _ia.get_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    path = _ia.save_session(s)
+    return {"filename": path.name}
+
+
 @app.get("/interview/results")
 def interview_results_list():
     """列出所有已保存的面试结果文件。"""
