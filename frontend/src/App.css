@@ -2660,13 +2660,23 @@ body {
 .rv-verdict--deepen   { background: rgba(239,68,68,0.15);  color: var(--danger); }
 .rv-verdict--pivot    { background: rgba(99,102,241,0.15); color: var(--primary); }
 .rv-verdict--back_up  { background: rgba(251,191,36,0.15); color: var(--amber); }
-/* Node annotation lines */
-.rv-node-intent    { margin: 2px 0 3px 31px; font-size: 10px; color: var(--primary); font-style: italic; }
-.rv-node-reasoning { margin: 3px 0 3px 31px; font-size: 10px; color: var(--text-muted); line-height: 1.5; border-left: 2px solid rgba(99,102,241,0.3); padding-left: 6px; }
-.rv-node-director  { margin: 2px 0 3px 31px; font-size: 10px; color: var(--amber); font-style: italic; }
+/* Node annotation lines — unified rv-node-attr */
+.rv-node-attr { margin: 2px 0 2px 31px; font-size: 10px; line-height: 1.5; }
+.rv-node-attr--interviewer { color: var(--primary); font-style: italic; }
+.rv-node-attr--scorer      { color: var(--text-muted); border-left: 2px solid rgba(99,102,241,0.3); padding-left: 6px; }
+.rv-node-attr--feedback    { color: var(--text-muted); padding-left: 8px; }
+.rv-node-attr--director    { color: var(--amber); font-style: italic; }
+.rv-node-attr--planned     { color: var(--primary); opacity: 0.6; font-style: italic; }
 
-/* InfoPanel intent */
-.info-task-intent { font-size: 10px; color: var(--primary); font-style: italic; margin-left: 26px; line-height: 1.4; }
+/* InfoPanel attribution lines */
+.info-task-attr { font-size: 10px; line-height: 1.4; margin-left: 26px; }
+.info-task-attr--interviewer { color: var(--primary); font-style: italic; }
+.info-task-attr--scorer      { color: var(--text-muted); }
+
+/* Planned node style */
+.info-task--planned { opacity: 0.55; }
+.info-task--planned .info-task-text { font-style: italic; }
+.info-task-planned-text { color: var(--text-muted); }
 
 /* Updated verdict colors for InfoPanel */
 .info-task-verdict--deepen  { background: rgba(239,68,68,0.15);  color: var(--danger); }

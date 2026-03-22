@@ -31,6 +31,9 @@ interface ThoughtNode {
   children:        ThoughtNode[];
 }
 
+const verdictLabel = (v: string) =>
+  v === 'deepen' ? '深挖' : v === 'pivot' ? '转向' : v === 'back_up' ? '退层' : v;
+
 interface SessionResult {
   session_id: string;
   saved_at:   string;
@@ -93,24 +96,33 @@ function TreeView({ roots }: { roots: ThoughtNode[] }) {
           )}
           {node.verdict && node.verdict !== 'pass' && (
             <span className={`rv-verdict rv-verdict--${node.verdict}`}>
-              {node.verdict === 'deepen' ? '深挖' : node.verdict === 'pivot' ? '转向' : node.verdict === 'back_up' ? '退层' : node.verdict}
+              🎬 {verdictLabel(node.verdict)}
             </span>
           )}
         </div>
-        {node.question_intent && !isTask && (
-          <div className="rv-node-intent">考察：{node.question_intent}</div>
+        {/* 🎙 面试官出题意图 */}
+        {node.question_intent && !isTask && node.status !== 'planned' && (
+          <div className="rv-node-attr rv-node-attr--interviewer">🎙 {node.question_intent}</div>
         )}
+        {/* planned 节点 */}
+        {node.status === 'planned' && (
+          <div className="rv-node-attr rv-node-attr--planned">🎬 待问：{node.question_intent}</div>
+        )}
+        {/* 候选人回答 */}
         {node.answer && !isTask && (
           <div className="rv-node-answer">{node.answer}</div>
         )}
+        {/* 📊 评分员 CoT 分析 */}
         {node.reasoning && (
-          <div className="rv-node-reasoning">{node.reasoning}</div>
+          <div className="rv-node-attr rv-node-attr--scorer">📊 {node.reasoning}</div>
         )}
+        {/* 📊 评分反馈（简短） */}
         {node.feedback && (
-          <div className="rv-node-feedback">{node.feedback}</div>
+          <div className="rv-node-attr rv-node-attr--feedback">└ {node.feedback}</div>
         )}
+        {/* 🎬 导演决策理由 */}
         {node.director_note && node.verdict && (
-          <div className="rv-node-director">导演：{node.verdict} — {node.director_note}</div>
+          <div className="rv-node-attr rv-node-attr--director">🎬 {verdictLabel(node.verdict)} — {node.director_note}</div>
         )}
         {!isCollapsed && node.children.map(c => renderNode(c, indent + 1))}
       </div>

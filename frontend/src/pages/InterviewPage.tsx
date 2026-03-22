@@ -17,7 +17,7 @@ interface ThoughtNode {
   text: string;
   answer: string;
   depth: number;
-  status: 'pending' | 'active' | 'asking' | 'answering' | 'answered' | 'scored' | 'done';
+  status: 'pending' | 'active' | 'asking' | 'answering' | 'answered' | 'scored' | 'done' | 'planned';
   score: number | null;
   verdict: 'pass' | 'deepen' | 'pivot' | 'back_up' | null;
   feedback: string;
@@ -169,14 +169,19 @@ function InfoPanel({
     });
   };
 
+  const verdictLabel = (v: string) =>
+    v === 'deepen' ? '深挖' : v === 'pivot' ? '转向' : v === 'back_up' ? '退层' : v;
+
   const renderNode = (node: ThoughtNode, indent = 0): React.ReactNode => {
     const isActiveNode = node.id === sm?.current_node_id || node.id === sm?.current_task_id;
     const isTask = node.node_type === 'task';
+    const isPlanned = node.status === 'planned';
     const hasChildren = node.children.length > 0;
     const isCollapsed = collapsed.has(node.id);
+    const isDoneOrScored = node.status === 'done' || node.status === 'scored';
     return (
       <div key={node.id}
-        className={`info-task ${isActiveNode ? 'info-task--active' : ''} ${node.status === 'done' ? 'info-task--done' : ''} ${node.status === 'pending' ? 'info-task--pending' : ''} ${isTask ? 'info-task--task' : 'info-task--question'}`}
+        className={`info-task ${isActiveNode ? 'info-task--active' : ''} ${node.status === 'done' ? 'info-task--done' : ''} ${node.status === 'pending' ? 'info-task--pending' : ''} ${isPlanned ? 'info-task--planned' : ''} ${isTask ? 'info-task--task' : 'info-task--question'}`}
         style={{ marginLeft: indent * 14 }}
       >
         <div className="info-task-row" onClick={() => hasChildren && toggleCollapse(node.id)}
@@ -185,12 +190,14 @@ function InfoPanel({
             {hasChildren ? (isCollapsed ? '▸' : '▾') : ' '}
           </span>
           <span className="info-task-bullet">
-            {isTask
-              ? (node.status === 'done' ? '✓' : isActiveNode ? '▶' : '○')
-              : (node.status === 'done' || node.status === 'scored' ? (node.score && node.score >= 4 ? '✓' : '·') : isActiveNode ? '❓' : '·')
-            }
+            {isTask ? (node.status === 'done' ? '✓' : isActiveNode ? '▶' : '○')
+              : isPlanned ? '…'
+              : isDoneOrScored ? (node.score && node.score >= 4 ? '✓' : '·')
+              : isActiveNode ? '❓' : '·'}
           </span>
-          <span className="info-task-text">{node.text}</span>
+          <span className="info-task-text">
+            {isPlanned ? <span className="info-task-planned-text">{node.question_intent}</span> : node.text}
+          </span>
           {node.score !== null && (
             <span className={`info-task-score info-task-score--${node.score >= 4 ? 'good' : node.score <= 2 ? 'low' : 'mid'}`}>
               {node.score}/5
@@ -198,15 +205,17 @@ function InfoPanel({
           )}
           {node.verdict && node.verdict !== 'pass' && (
             <span className={`info-task-verdict info-task-verdict--${node.verdict}`}>
-              {node.verdict === 'deepen' ? '深挖' : node.verdict === 'pivot' ? '转向' : node.verdict === 'back_up' ? '退层' : node.verdict}
+              🎬 {verdictLabel(node.verdict)}
             </span>
           )}
         </div>
-        {node.question_intent && !isTask && (
-          <div className="info-task-intent">考察：{node.question_intent}</div>
+        {/* 🎙 面试官意图 */}
+        {node.question_intent && !isTask && !isPlanned && (
+          <div className="info-task-attr info-task-attr--interviewer">🎙 {node.question_intent}</div>
         )}
-        {node.feedback && (node.status === 'done' || node.status === 'scored') && (
-          <div className="info-task-fb">{node.feedback}</div>
+        {/* 📊 评分反馈 */}
+        {node.feedback && isDoneOrScored && (
+          <div className="info-task-attr info-task-attr--scorer">📊 {node.feedback}</div>
         )}
         {!isCollapsed && node.children.map(c => renderNode(c, indent + 1))}
       </div>
