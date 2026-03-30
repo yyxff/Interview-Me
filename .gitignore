@@ -12,6 +12,8 @@ backend/chroma_db*/
 backend/knowledge/
 # 用户笔记（本地数据）
 backend/notes/
+# 知识问答对话记录（本地数据）
+backend/qa_sessions/
 # 图谱数据（本地生成，可重建）
 backend/graph/
 # 评测日志（本地产物）

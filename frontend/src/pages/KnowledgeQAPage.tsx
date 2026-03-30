@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
 import ReactMarkdown from 'react-markdown';
 import ForceGraph3D from '3d-force-graph';
 
@@ -86,6 +86,27 @@ interface ConvNode {
   childIds: string[];
 }
 
+interface ConvTab {
+  id:        string;
+  label:     string;
+  currentId: string | null;
+}
+
+// Git-branch icon for the fork button
+function BranchIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="4"  cy="12" r="1.6" fill="currentColor"/>
+      <circle cx="4"  cy="5"  r="1.6" fill="currentColor"/>
+      <circle cx="10" cy="2"  r="1.6" fill="currentColor"/>
+      <line x1="4" y1="6.6" x2="4" y2="10.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      <path d="M4,5 C4,3 4,2 10,2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+
+
 function getPath(nodes: Record<string, ConvNode>, leafId: string | null): ConvNode[] {
   const path: ConvNode[] = [];
   let cur: string | null = leafId;
@@ -98,64 +119,215 @@ function getPath(nodes: Record<string, ConvNode>, leafId: string | null): ConvNo
   return path;
 }
 
-function ConvTree({ nodes, rootIds, currentId, loading, onSelect, onNewRoot }: {
-  nodes:     Record<string, ConvNode>;
-  rootIds:   string[];
-  currentId: string | null;
-  loading:   boolean;
-  onSelect:  (id: string) => void;
-  onNewRoot: () => void;
+// ── Branch map: mind-map style SVG visualization ──────────────────────────────
+
+const BM_NODE_W = 82;
+const BM_NODE_H = 26;
+const BM_V_STEP = 64;  // vertical step per depth level (px)
+const BM_H_SLOT = 100; // horizontal space per "slot" (px)
+const BM_PAD    = 10;  // canvas padding
+
+interface BMapNode { id: string; x: number; y: number; label: string; isActive: boolean; isPath: boolean; }
+interface BMapEdge { d: string; isPath: boolean; }
+
+function layoutBranchMap(
+  nodes: Record<string, ConvNode>,
+  rootIds: string[],
+  activePath: Set<string>,
+  activeId: string | null,
+): { mnodes: BMapNode[]; edges: BMapEdge[]; svgW: number; svgH: number } {
+  const mnodes: BMapNode[] = [];
+  const edges:  BMapEdge[] = [];
+
+  // Count leaf slots in a subtree
+  function slots(id: string): number {
+    const n = nodes[id];
+    if (!n || n.childIds.length === 0) return 1;
+    return n.childIds.reduce((s, cid) => s + slots(cid), 0);
+  }
+
+  function place(id: string, depth: number, slotStart: number) {
+    const n = nodes[id];
+    if (!n) return;
+    const totalSlots = slots(id);
+    const y = BM_PAD + depth * BM_V_STEP;
+    const x = BM_PAD + (slotStart + (totalSlots - 1) / 2) * BM_H_SLOT;
+    const raw = n.question.content;
+    mnodes.push({
+      id, x, y,
+      label: raw.length > 12 ? raw.slice(0, 12) + '…' : raw,
+      isActive: id === activeId,
+      isPath: activePath.has(id),
+    });
+    let cs = slotStart;
+    for (const cid of n.childIds) {
+      const cSlots = slots(cid);
+      const cy = BM_PAD + (depth + 1) * BM_V_STEP;
+      const cx = BM_PAD + (cs + (cSlots - 1) / 2) * BM_H_SLOT;
+      const x1 = x  + BM_NODE_W / 2, y1 = y  + BM_NODE_H;  // bottom-center of parent
+      const x2 = cx + BM_NODE_W / 2, y2 = cy;               // top-center of child
+      const my = (y1 + y2) / 2;
+      const isPathEdge = activePath.has(id) && activePath.has(cid);
+      edges.push({ d: `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`, isPath: isPathEdge });
+      place(cid, depth + 1, cs);
+      cs += cSlots;
+    }
+  }
+
+  let rootSlot = 0;
+  for (const rid of rootIds) {
+    place(rid, 0, rootSlot);
+    rootSlot += slots(rid) + 0.6; // small gap between separate root trees
+  }
+
+  const svgW = mnodes.reduce((m, n) => Math.max(m, n.x + BM_NODE_W + BM_PAD), 160);
+  const svgH = mnodes.reduce((m, n) => Math.max(m, n.y + BM_NODE_H + BM_PAD), 60);
+  return { mnodes, edges, svgW, svgH };
+}
+
+function BranchMap({ nodes, rootIds, activeCurrentId, onNavigate }: {
+  nodes:           Record<string, ConvNode>;
+  rootIds:         string[];
+  activeCurrentId: string | null;
+  onNavigate:      (id: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  const [tooltip, setTooltip]       = useState<{ x: number; y: number; text: string } | null>(null);
+  const [pan, setPan]               = useState<{ x: number; y: number }>({ x: 10, y: 10 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+  const didDragRef = useRef(false);
 
   const activePath = useMemo(() => {
-    const set = new Set<string>();
-    let cur: string | null = currentId;
-    while (cur) { set.add(cur); cur = nodes[cur]?.parentId ?? null; }
-    return set;
-  }, [nodes, currentId]);
+    const s = new Set<string>();
+    let cur: string | null = activeCurrentId;
+    while (cur) { s.add(cur); cur = nodes[cur]?.parentId ?? null; }
+    return s;
+  }, [nodes, activeCurrentId]);
 
-  const renderNode = (id: string, depth = 0): React.ReactNode => {
-    const n = nodes[id];
-    if (!n) return null;
-    const isOnPath = activePath.has(id);
-    const isCurrent = id === currentId;
-    const label = n.question.content.length > 22
-      ? n.question.content.slice(0, 22) + '…'
-      : n.question.content;
-    return (
-      <div key={id}>
-        <div
-          className={`ctree-node${isOnPath ? ' ctree-node--path' : ''}${isCurrent ? ' ctree-node--current' : ''}`}
-          style={{ paddingLeft: 6 + depth * 12 }}
-          onClick={() => !loading && onSelect(id)}
-          title={n.question.content}
-        >
-          <span className="ctree-dot" />
-          <span className="ctree-label">{label}</span>
-          {n.childIds.length > 1 && (
-            <span className="ctree-fork-badge">{n.childIds.length}</span>
-          )}
-        </div>
-        {n.childIds.map(cid => renderNode(cid, depth + 1))}
-      </div>
-    );
-  };
+  const { mnodes, edges, svgW, svgH } = useMemo(
+    () => layoutBranchMap(nodes, rootIds, activePath, activeCurrentId),
+    [nodes, rootIds, activePath, activeCurrentId],
+  );
 
-  if (rootIds.length === 0) return null;
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    dragRef.current = { startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y };
+    didDragRef.current = false;
+    setIsDragging(true);
+    e.preventDefault();
+  }, [pan]);
+
+  const onMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) didDragRef.current = true;
+    setPan({ x: dragRef.current.panX + dx, y: dragRef.current.panY + dy });
+  }, []);
+
+  const onMouseUp = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
+  }, []);
+
+  const handleNodeClick = useCallback((id: string) => {
+    if (!didDragRef.current) onNavigate(id);
+  }, [onNavigate]);
+
+  if (rootIds.length === 0) return <p className="bpanel-empty">开始对话后显示分支图</p>;
 
   return (
-    <div className="ctree-panel">
-      <div className="ctree-header">
-        <span className="ctree-title" onClick={() => setOpen(o => !o)}>
-          {open ? '▾' : '▸'} 对话树
-          <span className="ctree-count">{Object.keys(nodes).length}</span>
-        </span>
-        <button className="ctree-new-btn" title="新对话（从根开始）" onClick={onNewRoot}>＋</button>
+    <div
+      className={`branch-map-wrap${isDragging ? ' branch-map-wrap--dragging' : ''}`}
+      onMouseDown={onMouseDown}
+      onMouseMove={onMouseMove}
+      onMouseUp={onMouseUp}
+      onMouseLeave={onMouseUp}
+    >
+      <div className="branch-map-pan" style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}>
+        <svg width={svgW} height={svgH}>
+          {edges.map((e, i) => (
+            <path key={i} d={e.d} className={`bmap-edge${e.isPath ? ' bmap-edge--path' : ''}`} />
+          ))}
+          {mnodes.map(n => (
+            <g
+              key={n.id}
+              className="bmap-node-g"
+              onClick={() => handleNodeClick(n.id)}
+              onMouseEnter={ev => setTooltip({ x: ev.clientX, y: ev.clientY, text: nodes[n.id]?.question.content ?? '' })}
+              onMouseLeave={() => setTooltip(null)}
+            >
+              <rect x={n.x} y={n.y} width={BM_NODE_W} height={BM_NODE_H} rx={5}
+                className={`bmap-node${n.isActive ? ' bmap-node--active' : n.isPath ? ' bmap-node--path' : ''}`} />
+              <text x={n.x + BM_NODE_W / 2} y={n.y + BM_NODE_H / 2 + 4} textAnchor="middle"
+                className={`bmap-text${n.isActive ? ' bmap-text--active' : n.isPath ? ' bmap-text--path' : ''}`}>
+                {n.label}
+              </text>
+            </g>
+          ))}
+        </svg>
       </div>
-      {open && (
-        <div className="ctree-body">
-          {rootIds.map(id => renderNode(id))}
+      {tooltip && !isDragging && (
+        <div className="bmap-tooltip" style={{ position: 'fixed', left: tooltip.x + 14, top: tooltip.y - 10 }}>
+          {tooltip.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── QA Session persistence ─────────────────────────────────────────────────────
+
+interface QASessionMeta {
+  session_id: string;
+  title:      string;
+  created_at: string;
+  updated_at: string;
+  node_count: number;
+}
+
+function SessionListView({ onLoad, onNew }: {
+  onLoad: (sid: string) => void;
+  onNew:  () => void;
+}) {
+  const [sessions, setSessions] = useState<QASessionMeta[]>([]);
+  const [loading, setLoading]   = useState(true);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/qa-sessions`)
+      .then(r => r.json())
+      .then(d => setSessions(d.sessions ?? []))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleDelete = async (sid: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm('确认删除此对话记录？')) return;
+    await fetch(`${API_BASE}/qa-sessions/${sid}`, { method: 'DELETE' });
+    setSessions(prev => prev.filter(s => s.session_id !== sid));
+  };
+
+  return (
+    <div className="qa-session-list-page">
+      <div className="qa-session-list-header">
+        <span className="qa-session-list-title">知识库问答</span>
+        <button className="btn btn--primary" onClick={onNew}>新对话</button>
+      </div>
+      {loading ? (
+        <div className="qa-session-empty">加载中…</div>
+      ) : sessions.length === 0 ? (
+        <div className="qa-session-empty">暂无对话记录，点击「新对话」开始</div>
+      ) : (
+        <div className="qa-session-list">
+          {sessions.map(s => (
+            <div key={s.session_id} className="qa-session-item" onClick={() => onLoad(s.session_id)}>
+              <div className="qa-session-item-title">{s.title || '新对话'}</div>
+              <div className="qa-session-item-meta">
+                <span>{fmtDate(s.updated_at)}</span>
+                <span>{s.node_count} 条对话</span>
+              </div>
+              <button className="qa-session-item-del" onClick={e => handleDelete(s.session_id, e)}>×</button>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -898,37 +1070,47 @@ function SourceModal({ source, onClose }: { source: Source; onClose: () => void 
   );
 }
 
-// ── Notes sidebar (right) ─────────────────────────────────────────────────────
+// ── Right panel: branch tree + notes ─────────────────────────────────────────
 
-function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
-  notes:     Note[];
-  onDelete:  (note_id: string) => void;
-  onRefresh: () => void;
-  onIndex:   (note_id: string) => Promise<void>;
+function RightPanel({
+  nodes, rootIds, activeCurrentId,
+  onNavigate,
+  notes, onDeleteNote, onRefreshNotes, onIndexNote,
+}: {
+  nodes:           Record<string, ConvNode>;
+  rootIds:         string[];
+  activeCurrentId: string | null;
+  onNavigate:      (id: string) => void;
+  notes:           Note[];
+  onDeleteNote:    (note_id: string) => void;
+  onRefreshNotes:  () => void;
+  onIndexNote:     (note_id: string) => Promise<void>;
 }) {
-  const [expanded, setExpanded]               = useState<string | null>(null);
-  const [expandedContent, setExpandedContent] = useState('');
+  const [tab, setTab] = useState<'tree' | 'notes'>('tree');
+  const [expandedNote, setExpandedNote]           = useState<string | null>(null);
+  const [expandedContent, setExpandedContent]     = useState('');
   const [expandedQuestions, setExpandedQuestions] = useState<string[]>([]);
-  const [indexing, setIndexing]               = useState(false);
-  const [indexStatus, setIndexStatus]         = useState<'idle' | 'ok' | 'error'>('idle');
+  const [indexing, setIndexing]       = useState(false);
+  const [indexStatus, setIndexStatus] = useState<'idle' | 'ok' | 'error'>('idle');
 
-  const handleExpand = async (note_id: string) => {
+  // ── Notes handlers ──
+  const handleNoteExpand = async (note_id: string) => {
     try {
       const res  = await fetch(`${API_BASE}/notes/${note_id}`);
       const data = await res.json();
       setExpandedContent(data.content ?? '');
       setExpandedQuestions(data.questions ?? []);
-      setExpanded(note_id);
+      setExpandedNote(note_id);
       setIndexStatus('idle');
     } catch { /* ignore */ }
   };
 
-  const handleIndex = async () => {
-    if (!expanded || indexing) return;
+  const handleNoteIndex = async () => {
+    if (!expandedNote || indexing) return;
     setIndexing(true);
     setIndexStatus('idle');
     try {
-      await onIndex(expanded);
+      await onIndexNote(expandedNote);
       setIndexStatus('ok');
       setTimeout(() => setIndexStatus('idle'), 2500);
     } catch {
@@ -939,96 +1121,104 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
     }
   };
 
-  const handleDelete = async (note_id: string) => {
+  const handleNoteDelete = async (note_id: string) => {
     if (!confirm('确认删除这条笔记？')) return;
     await fetch(`${API_BASE}/notes/${note_id}`, { method: 'DELETE' });
-    onDelete(note_id);
-    if (expanded === note_id) setExpanded(null);
+    onDeleteNote(note_id);
+    if (expandedNote === note_id) setExpandedNote(null);
   };
 
-  const expandedNote = notes.find((n) => n.note_id === expanded);
+  const expandedNoteObj = notes.find(n => n.note_id === expandedNote);
 
-  // ── Expanded view ──
-  if (expanded && expandedNote) {
-    return (
-      <aside className="kqa-right">
-        <div className="note-expanded-header">
-          <button className="btn btn--icon btn--sm" onClick={() => setExpanded(null)}>← 返回</button>
-          <div className="note-expanded-title">
-            {expandedNote.title}
-            {expandedNote.indexed && <span className="note-indexed-badge" title="已加入知识库">知识库</span>}
-          </div>
-          <div className="note-expanded-meta">{fmtDate(expandedNote.created_at)}</div>
-        </div>
-        <div className="note-expanded-content note-expanded-content--md">
-          <ReactMarkdown>{expandedContent}</ReactMarkdown>
-        </div>
-        {expandedQuestions.length > 0 && (
-          <div className="note-questions">
-            <div className="note-questions-label">相关问题</div>
-            {expandedQuestions.map((q, i) => (
-              <div key={i} className="note-question-item">
-                <span className="note-question-num">Q{i + 1}</span>
-                {q}
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="note-expanded-footer">
-          <button
-            className={`btn btn--sm ${indexStatus === 'ok' ? 'btn--success' : indexStatus === 'error' ? 'btn--danger' : 'btn--primary'}`}
-            onClick={handleIndex}
-            disabled={indexing || indexStatus === 'ok'}
-            title="将笔记向量化加入知识库，之后问答时会参考此笔记"
-          >
-            {indexing ? '向量化中…' : indexStatus === 'ok' ? '✓ 已加入' : indexStatus === 'error' ? '失败，重试' : '加入知识库'}
-          </button>
-          <button className="btn btn--icon btn--sm note-delete-btn" onClick={() => handleDelete(expanded)}>
-            删除
-          </button>
-        </div>
-      </aside>
-    );
-  }
-
-  // ── List view ──
   return (
     <aside className="kqa-right">
-      <div className="kqa-panel-header">
-        <span className="kqa-panel-title">知识笔记</span>
-        <button className="btn btn--icon btn--sm" onClick={onRefresh} title="刷新">↻</button>
+      {/* Panel tab bar */}
+      <div className="kqa-rpanel-tabs">
+        <button
+          className={`kqa-rpanel-tab${tab === 'tree' ? ' kqa-rpanel-tab--active' : ''}`}
+          onClick={() => setTab('tree')}
+        >对话树</button>
+        <button
+          className={`kqa-rpanel-tab${tab === 'notes' ? ' kqa-rpanel-tab--active' : ''}`}
+          onClick={() => setTab('notes')}
+        >知识笔记</button>
       </div>
-      <div className="notes-list">
-        {notes.length === 0 && (
-          <p className="kqa-empty">暂无笔记，点击 ✦ 总结对话</p>
-        )}
-        {notes.map((n) => (
-          <div key={n.note_id} className="note-item">
-            <div className="note-item-header">
-              <button
-                className="note-item-title"
-                onClick={() => !n.indexing && handleExpand(n.note_id)}
-                disabled={n.indexing}
-              >
-                {n.title}
-              </button>
-              <div className="note-item-actions">
-                {n.indexed && <span className="note-indexed-badge" title="已加入知识库">知识库</span>}
-                <button
-                  className="btn btn--icon btn--sm note-delete-btn"
-                  onClick={() => handleDelete(n.note_id)}
-                  disabled={n.indexing}
-                >✕</button>
+
+      {tab === 'tree' ? (
+        /* ── Branch map (SVG mind-map) ── */
+        <div className="branch-map-scroll">
+          <BranchMap
+            nodes={nodes}
+            rootIds={rootIds}
+            activeCurrentId={activeCurrentId}
+            onNavigate={onNavigate}
+          />
+        </div>
+      ) : (
+        /* ── Notes view ── */
+        expandedNote && expandedNoteObj ? (
+          <div className="notes-expanded">
+            <div className="note-expanded-header">
+              <button className="btn btn--icon btn--sm" onClick={() => setExpandedNote(null)}>← 返回</button>
+              <div className="note-expanded-title">
+                {expandedNoteObj.title}
+                {expandedNoteObj.indexed && <span className="note-indexed-badge" title="已加入知识库">知识库</span>}
               </div>
+              <div className="note-expanded-meta">{fmtDate(expandedNoteObj.created_at)}</div>
             </div>
-            <div className="note-item-meta">
-              {n.indexing
-                ? <span className="note-indexing">保存中…</span>
-                : fmtDate(n.created_at)}
+            <div className="note-expanded-content note-expanded-content--md">
+              <ReactMarkdown>{expandedContent}</ReactMarkdown>
+            </div>
+            {expandedQuestions.length > 0 && (
+              <div className="note-questions">
+                <div className="note-questions-label">相关问题</div>
+                {expandedQuestions.map((q, i) => (
+                  <div key={i} className="note-question-item">
+                    <span className="note-question-num">Q{i + 1}</span>{q}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="note-expanded-footer">
+              <button
+                className={`btn btn--sm ${indexStatus === 'ok' ? 'btn--success' : indexStatus === 'error' ? 'btn--danger' : 'btn--primary'}`}
+                onClick={handleNoteIndex}
+                disabled={indexing || indexStatus === 'ok'}
+                title="将笔记向量化加入知识库，之后问答时会参考此笔记"
+              >
+                {indexing ? '向量化中…' : indexStatus === 'ok' ? '✓ 已加入' : indexStatus === 'error' ? '失败，重试' : '加入知识库'}
+              </button>
+              <button className="btn btn--icon btn--sm note-delete-btn" onClick={() => handleNoteDelete(expandedNote)}>删除</button>
             </div>
           </div>
-        ))}
-      </div>
+        ) : (
+          <>
+            <div className="kqa-panel-header">
+              <span className="kqa-panel-title">知识笔记</span>
+              <button className="btn btn--icon btn--sm" onClick={onRefreshNotes} title="刷新">↻</button>
+            </div>
+            <div className="notes-list">
+              {notes.length === 0 && <p className="kqa-empty">暂无笔记，点击 ✦ 总结对话</p>}
+              {notes.map(n => (
+                <div key={n.note_id} className="note-item">
+                  <div className="note-item-header">
+                    <button className="note-item-title" onClick={() => !n.indexing && handleNoteExpand(n.note_id)} disabled={n.indexing}>
+                      {n.title}
+                    </button>
+                    <div className="note-item-actions">
+                      {n.indexed && <span className="note-indexed-badge" title="已加入知识库">知识库</span>}
+                      <button className="btn btn--icon btn--sm note-delete-btn" onClick={() => handleNoteDelete(n.note_id)} disabled={n.indexing}>✕</button>
+                    </div>
+                  </div>
+                  <div className="note-item-meta">
+                    {n.indexing ? <span className="note-indexing">保存中…</span> : fmtDate(n.created_at)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )
+      )}
     </aside>
   );
 }
@@ -1036,23 +1226,39 @@ function NotesSidebar({ notes, onDelete, onRefresh, onIndex }: {
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function KnowledgeQAPage() {
-  // ── Forked conversation tree state ──────────────────────────────────────────
+  // ── Session view state ───────────────────────────────────────────────────────
+  const [view, setView]           = useState<'list' | 'chat'>('list');
+  const [sessionId, setSessionId] = useState('');
+  const sessionIdRef              = useRef('');
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+
+  // ── Tab + conversation tree state ───────────────────────────────────────────
+  const tabCountRef               = useRef(1);
+  const [tabs, setTabs]           = useState<ConvTab[]>([{ id: 'tab-1', label: '对话 1', currentId: null }]);
+  const [activeTabId, setActiveTabId] = useState('tab-1');
   const [nodes, setNodes]         = useState<Record<string, ConvNode>>({});
   const [rootIds, setRootIds]     = useState<string[]>([]);
-  const [currentId, setCurrentId] = useState<string | null>(null);
-  const nodesRef    = useRef<Record<string, ConvNode>>({});
-  const currentIdRef = useRef<string | null>(null);
+  const nodesRef                  = useRef<Record<string, ConvNode>>({});
+  const rootIdsRef                = useRef<string[]>([]);
+  const tabsRef                   = useRef<ConvTab[]>([{ id: 'tab-1', label: '对话 1', currentId: null }]);
+  const currentIdRef              = useRef<string | null>(null);
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+  useEffect(() => { rootIdsRef.current = rootIds; }, [rootIds]);
+  useEffect(() => { tabsRef.current = tabs; }, [tabs]);
 
-  // Derived: messages to display = path from root to currentId
-  const pathMessages = useMemo(() => {
-    const path = getPath(nodes, currentId);
-    return path.flatMap(n => [n.question, n.answer]);
-  }, [nodes, currentId]);
+  const currentId = useMemo(
+    () => tabs.find(t => t.id === activeTabId)?.currentId ?? null,
+    [tabs, activeTabId],
+  );
+  useEffect(() => { currentIdRef.current = currentId; }, [currentId]);
+
+  // Derived: path from root to currentId
+  const pathNodes = useMemo(() => getPath(nodes, currentId), [nodes, currentId]);
 
   // ── Other state ─────────────────────────────────────────────────────────────
   const [input, setInput]             = useState('');
-  const [loading, setLoading]         = useState(false);
+  // Per-node loading: tracks nodeIds with in-flight requests so branches don't block each other
+  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
   const [viewer, setViewer]           = useState<Source | null>(null);
   const [showFullGraph, setShowFullGraph] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
@@ -1069,12 +1275,49 @@ export default function KnowledgeQAPage() {
 
   useEffect(() => {
     if (atBottomRef.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [pathMessages]);
+  }, [pathNodes]);
 
-  // Scroll to bottom whenever we switch branches
+  // Navigate: update the active tab's currentId
   const handleSelectNode = useCallback((id: string) => {
-    setCurrentId(id);
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, currentId: id } : t));
     currentIdRef.current = id;
+    atBottomRef.current = true;
+  }, [activeTabId]);
+
+  // Switch to an existing tab
+  const switchTab = useCallback((tabId: string) => {
+    const t = tabs.find(tab => tab.id === tabId);
+    setActiveTabId(tabId);
+    currentIdRef.current = t?.currentId ?? null;
+    atBottomRef.current = true;
+  }, [tabs]);
+
+  // Close a tab (not the last one)
+  const closeTab = useCallback((tabId: string) => {
+    setTabs(prev => {
+      if (prev.length <= 1) return prev;
+      const idx  = prev.findIndex(t => t.id === tabId);
+      const next = prev.filter(t => t.id !== tabId);
+      if (tabId === activeTabId) {
+        const fallback = next[Math.max(0, idx - 1)];
+        setActiveTabId(fallback.id);
+        currentIdRef.current = fallback.currentId;
+      }
+      return next;
+    });
+  }, [activeTabId]);
+
+  // Fork: create a new tab branching from the current position
+  const forkFromNode = useCallback(() => {
+    const fromId = currentIdRef.current;
+    const n = fromId ? nodesRef.current[fromId] : null;
+    const rawLabel = n?.question.content ?? '';
+    const label = rawLabel.length > 14 ? rawLabel.slice(0, 14) + '…' : rawLabel || `对话 ${tabCountRef.current + 1}`;
+    tabCountRef.current += 1;
+    const newTab: ConvTab = { id: `tab-${Date.now()}`, label, currentId: fromId };
+    setTabs(prev => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+    currentIdRef.current = fromId;
     atBottomRef.current = true;
   }, []);
 
@@ -1088,11 +1331,13 @@ export default function KnowledgeQAPage() {
 
   useEffect(() => { fetchNotes(); }, [fetchNotes]);
 
-  // ── Submit: create a new ConvNode as child of currentId ─────────────────────
+  // ── Submit: create a new ConvNode as child of current node ──────────────────
   const submit = async () => {
     const question = input.trim();
-    if (!question || loading) return;
+    const isCurrentLoading = !!currentIdRef.current && loadingNodes.has(currentIdRef.current);
+    if (!question || isCurrentLoading) return;
     setInput('');
+    const tabId = activeTabId;
 
     // History = current branch path (for LLM context), capped at 12 messages
     const currentPath = getPath(nodesRef.current, currentIdRef.current);
@@ -1117,10 +1362,10 @@ export default function KnowledgeQAPage() {
       return next;
     });
     if (!parentId) setRootIds(prev => [...prev, nodeId]);
-    setCurrentId(nodeId);
+    setTabs(prev => prev.map(t => t.id === tabId ? { ...t, currentId: nodeId } : t));
     currentIdRef.current = nodeId;
     atBottomRef.current = true;
-    setLoading(true);
+    setLoadingNodes(prev => { const s = new Set(prev); s.add(nodeId); return s; });
 
     // Stream answer
     try {
@@ -1185,23 +1430,22 @@ export default function KnowledgeQAPage() {
         return next;
       });
     } finally {
-      setLoading(false);
+      setLoadingNodes(prev => { const s = new Set(prev); s.delete(nodeId); return s; });
     }
   };
 
-  // ── Summarize: only current branch path ─────────────────────────────────────
+  // ── Summarize: root-to-currentId path ───────────────────────────────────────
   const handleSummarize = () => {
     const path = getPath(nodesRef.current, currentIdRef.current);
     const msgs = path.flatMap(n => [
       n.question.content ? { role: 'user',      content: n.question.content } : null,
       n.answer.content   ? { role: 'assistant', content: n.answer.content   } : null,
     ]).filter(Boolean) as { role: string; content: string }[];
-
     if (msgs.length === 0 || summarizing) return;
     setSummarizing(true);
 
     const tempId = `temp_${Date.now()}`;
-    setNotes((prev) => [{
+    setNotes(prev => [{
       note_id:    tempId,
       title:      'AI 总结中…',
       size:       0,
@@ -1217,21 +1461,19 @@ export default function KnowledgeQAPage() {
           body:    JSON.stringify({ messages: msgs }),
         });
         const { title, content, questions = [] } = await sumRes.json();
-
         const saveRes = await fetch(`${API_BASE}/notes/save`, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ title, content, questions }),
         });
         const data = await saveRes.json();
-
-        setNotes((prev) => prev.map((n) =>
+        setNotes(prev => prev.map(n =>
           n.note_id === tempId
             ? { note_id: data.note_id, title, size: data.size, created_at: data.created_at }
             : n
         ));
       } catch {
-        setNotes((prev) => prev.filter((n) => n.note_id !== tempId));
+        setNotes(prev => prev.filter(n => n.note_id !== tempId));
       } finally {
         setSummarizing(false);
       }
@@ -1244,110 +1486,191 @@ export default function KnowledgeQAPage() {
     setNotes((prev) => prev.map((n) => n.note_id === note_id ? { ...n, indexed: true } : n));
   };
 
-  const hasBranch = currentId != null && (nodesRef.current[currentId]?.childIds.length ?? 0) > 0;
+  // ── Auto-save session when nodes settle (no in-flight requests) ──────────────
+  useEffect(() => {
+    if (!sessionId || rootIds.length === 0 || loadingNodes.size > 0) return;
+    const title = nodes[rootIds[0]]?.question.content.slice(0, 50) ?? '新对话';
+    fetch(`${API_BASE}/qa-sessions/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, title, nodes, root_ids: rootIds, tabs }),
+    }).catch(() => {});
+  }, [nodes, rootIds, tabs, sessionId, loadingNodes]);
+
+  // ── Session list handlers ────────────────────────────────────────────────────
+  const handleLoadSession = async (sid: string) => {
+    const res  = await fetch(`${API_BASE}/qa-sessions/${sid}`);
+    const data = await res.json();
+    const loadedNodes: Record<string, ConvNode> = data.nodes ?? {};
+    const loadedRoots: string[]   = data.root_ids ?? [];
+    const loadedTabs:  ConvTab[]  = data.tabs ?? [{ id: 'tab-1', label: '对话 1', currentId: null }];
+    setNodes(loadedNodes);
+    nodesRef.current  = loadedNodes;
+    setRootIds(loadedRoots);
+    rootIdsRef.current = loadedRoots;
+    setTabs(loadedTabs);
+    tabsRef.current = loadedTabs;
+    // restore tabCountRef from highest tab number
+    const maxNum = loadedTabs.reduce((m, t) => {
+      const n = parseInt(t.id.replace('tab-', '')) || 0;
+      return Math.max(m, n);
+    }, 0);
+    tabCountRef.current = maxNum || loadedTabs.length;
+    setActiveTabId(loadedTabs[0]?.id ?? 'tab-1');
+    setSessionId(sid);
+    sessionIdRef.current = sid;
+    setView('chat');
+  };
+
+  const handleNewSession = () => {
+    const sid    = crypto.randomUUID();
+    const initTab: ConvTab = { id: 'tab-1', label: '对话 1', currentId: null };
+    setSessionId(sid);
+    sessionIdRef.current = sid;
+    setNodes({});
+    nodesRef.current = {};
+    setRootIds([]);
+    rootIdsRef.current = [];
+    tabCountRef.current = 1;
+    setTabs([initTab]);
+    tabsRef.current = [initTab];
+    setActiveTabId('tab-1');
+    setInput('');
+    setView('chat');
+  };
+
+  if (view === 'list') {
+    return (
+      <div className="kqa-page kqa-page--list">
+        <SessionListView onLoad={handleLoadSession} onNew={handleNewSession} />
+      </div>
+    );
+  }
 
   return (
     <div className="kqa-page">
-      <KnowledgeSidebar indexedNotes={notes.filter((n) => n.indexed && !n.indexing)} />
+      <KnowledgeSidebar indexedNotes={notes.filter(n => n.indexed && !n.indexing)} />
 
       <div className="qa-main">
-        {/* Conversation tree — floating panel top-right */}
-        <ConvTree
-          nodes={nodes}
-          rootIds={rootIds}
-          currentId={currentId}
-          loading={loading}
-          onSelect={handleSelectNode}
-          onNewRoot={() => { setCurrentId(null); currentIdRef.current = null; }}
-        />
+        {/* Session header */}
+        <div className="qa-session-bar">
+          <button className="btn btn--ghost btn--sm" onClick={() => setView('list')}>← 列表</button>
+          <span className="qa-session-bar-title">
+            {nodes[rootIds[0]]?.question.content.slice(0, 40) || '新对话'}
+          </span>
+        </div>
+
+        {/* Tab bar — tabs created via fork, no manual + button */}
+        {tabs.length > 1 && (
+          <div className="qa-window-tabs">
+            {tabs.map(tab => (
+              <button
+                key={tab.id}
+                className={`qa-window-tab${tab.id === activeTabId ? ' qa-window-tab--active' : ''}`}
+                onClick={() => switchTab(tab.id)}
+              >
+                <span className="qa-window-tab-label">{tab.label}</span>
+                <span className="qa-window-tab-close" onClick={e => { e.stopPropagation(); closeTab(tab.id); }}>✕</span>
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="qa-messages" ref={messagesRef} onScroll={handleScroll}>
-          {pathMessages.length === 0 && (
+          {pathNodes.length === 0 && (
             <div className="qa-empty">
               <p className="qa-empty-title">知识库问答</p>
-              <p className="qa-empty-hint">
-                {rootIds.length > 0
-                  ? '点击左侧树节点切换分支，或在下方输入新问题开始新对话'
-                  : '问题会检索知识库，将相关内容送入 AI 上下文后回答'}
-              </p>
+              <p className="qa-empty-hint">问题会检索知识库，将相关内容送入 AI 上下文后回答</p>
             </div>
           )}
-          {pathMessages.map((msg) => (
-            <div key={msg.id} className={`qa-msg qa-msg--${msg.role}`}>
-              <div className="qa-msg-label">{msg.role === 'user' ? '你' : 'AI'}</div>
-              {msg.role === 'assistant' && msg.rewritten_query && (
-                <div className="qa-sources">
-                  <span className="qa-sources-label">意图补全</span>
-                  <span className="qa-rewritten-chip">🔍 {msg.rewritten_query}</span>
+          {pathNodes.map(node => {
+            const isStreaming = loadingNodes.has(node.id);
+            const ans = node.answer;
+            return (
+              <Fragment key={node.id}>
+                {/* Question bubble */}
+                <div className="qa-msg qa-msg--user">
+                  <div className="qa-msg-label">你</div>
+                  <div className="qa-msg-bubble">{node.question.content}</div>
                 </div>
-              )}
-              <div className="qa-msg-bubble">
-                {msg.role === 'assistant' && msg.sources?.length && msg.content
-                  ? <CitedContent content={msg.content} sources={msg.sources} onOpen={setViewer} />
-                  : (msg.content || (loading && msg.role === 'assistant'
-                      ? <span className="stream-cursor" /> : null))}
-              </div>
-              {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (() => {
-                const listSources = msg.sources.filter(s => !s.via_graph);
-                return (
-                  <>
-                    {listSources.length > 0 && (
-                      <div className="qa-sources">
-                        <span className="qa-sources-label">参考资料</span>
-                        {listSources.map((s, i) => (
-                          <SourceChip key={s.chunk_id} index={i} source={s} onOpen={setViewer} />
-                        ))}
-                      </div>
-                    )}
-                    {msg.graph && msg.graph.nodes.length > 0 && (
-                      <GraphPanel data={msg.graph} sources={msg.sources!} onOpen={setViewer} />
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-          ))}
+                {/* Answer bubble */}
+                <div className="qa-msg qa-msg--assistant">
+                  <div className="qa-msg-label">AI</div>
+                  {ans.rewritten_query && (
+                    <div className="qa-sources">
+                      <span className="qa-sources-label">意图补全</span>
+                      <span className="qa-rewritten-chip">🔍 {ans.rewritten_query}</span>
+                    </div>
+                  )}
+                  <div className="qa-msg-bubble">
+                    {ans.sources?.length && ans.content
+                      ? <CitedContent content={ans.content} sources={ans.sources} onOpen={setViewer} />
+                      : (ans.content || (isStreaming ? <span className="stream-cursor" /> : null))}
+                  </div>
+                  {ans.sources && ans.sources.length > 0 && (() => {
+                    const listSources = ans.sources.filter(s => !s.via_graph);
+                    return (
+                      <>
+                        {listSources.length > 0 && (
+                          <div className="qa-sources">
+                            <span className="qa-sources-label">参考资料</span>
+                            {listSources.map((s, i) => (
+                              <SourceChip key={s.chunk_id} index={i} source={s} onOpen={setViewer} />
+                            ))}
+                          </div>
+                        )}
+                        {ans.graph && ans.graph.nodes.length > 0 && (
+                          <GraphPanel data={ans.graph} sources={ans.sources!} onOpen={setViewer} />
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </Fragment>
+            );
+          })}
           <div ref={bottomRef} />
         </div>
 
         <div className="qa-input-bar">
-          {hasBranch && (
-            <span className="qa-branch-tip" title="当前节点已有子分支，继续输入将创建新分支">
-              ⑂ 分叉
-            </span>
-          )}
           <input
             className="qa-input"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
-            placeholder={currentId ? '继续提问，或在树中选择其他节点切换分支…' : '输入问题…'}
-            disabled={loading}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
+            placeholder={currentId ? '继续提问，或在右侧树中选择节点…' : '输入问题…'}
+            disabled={!!currentId && loadingNodes.has(currentId)}
           />
           <button
             className="btn btn--icon"
-            onClick={() => setShowFullGraph(true)}
-            title="查看知识图谱"
-          >⬡</button>
+            onClick={forkFromNode}
+            disabled={!currentId}
+            title="从当前位置分叉出新对话标签"
+          ><BranchIcon /></button>
+          <button className="btn btn--icon" onClick={() => setShowFullGraph(true)} title="查看知识图谱">⬡</button>
           <button
             className="btn btn--icon"
             onClick={handleSummarize}
-            disabled={summarizing || pathMessages.length === 0}
-            title="总结当前分支对话为知识点"
-          >
-            {summarizing ? '…' : '✦'}
-          </button>
-          <button className="btn btn--primary" onClick={submit} disabled={loading || !input.trim()}>
-            {loading ? '…' : '发送'}
-          </button>
+            disabled={summarizing || pathNodes.length === 0}
+            title="总结当前分支对话为知识笔记"
+          >{summarizing ? '…' : '✦'}</button>
+          <button
+            className="btn btn--primary"
+            onClick={submit}
+            disabled={(!!currentId && loadingNodes.has(currentId)) || !input.trim()}
+          >{!!currentId && loadingNodes.has(currentId) ? '…' : '发送'}</button>
         </div>
       </div>
 
-      <NotesSidebar
+      <RightPanel
+        nodes={nodes}
+        rootIds={rootIds}
+        activeCurrentId={currentId}
+        onNavigate={handleSelectNode}
         notes={notes}
-        onDelete={(id) => setNotes((prev) => prev.filter((n) => n.note_id !== id))}
-        onRefresh={fetchNotes}
-        onIndex={handleIndexNote}
+        onDeleteNote={id => setNotes(prev => prev.filter(n => n.note_id !== id))}
+        onRefreshNotes={fetchNotes}
+        onIndexNote={handleIndexNote}
       />
 
       {viewer && <SourceModal source={viewer} onClose={() => setViewer(null)} />}

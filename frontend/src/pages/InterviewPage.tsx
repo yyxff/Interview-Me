@@ -209,13 +209,17 @@ function InfoPanel({
             </span>
           )}
         </div>
-        {/* 🎙 面试官意图 */}
+        {/* 面试官意图 */}
         {node.question_intent && !isTask && !isPlanned && (
-          <div className="info-task-attr info-task-attr--interviewer">🎙 {node.question_intent}</div>
+          <div className="info-task-attr info-task-attr--interviewer">
+            <span className="info-attr-label">面试官</span> {node.question_intent}
+          </div>
         )}
-        {/* 📊 评分反馈 */}
+        {/* 反馈 */}
         {node.feedback && isDoneOrScored && (
-          <div className="info-task-attr info-task-attr--scorer">📊 {node.feedback}</div>
+          <div className="info-task-attr info-task-attr--scorer">
+            <span className="info-attr-label">反馈</span> {node.feedback}
+          </div>
         )}
         {!isCollapsed && node.children.map(c => renderNode(c, indent + 1))}
       </div>

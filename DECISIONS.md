@@ -460,6 +460,53 @@ ChromaDB
 
 ---
 
+---
+
+## 20. 多 Agent 面试系统：ReAct + 工具目录化
+
+**已实施（2026-03-22）**
+
+- `director_plan()` 和 `interviewer_ask()` 均接入 `_react_loop()`
+  - Director 规划阶段：可调用 `search_knowledge` / `search_profile` / `search_past_sessions`（最多 3 步）
+  - Interviewer 提问阶段：可调用 `search_knowledge`（最多 2 步），动态决定是否查知识库
+- 工具目录化：`backend/tools/` 每个工具独立模块，`build_toolset(session, names)` 控制每个 agent 的工具权限
+- `director_plan()` 的 JSON 支持 `sub_questions[]`，开局就建好计划树（预埋子问题）
+
+**Rollup Summary（上下文压缩）：**
+- `ThoughtNode.summary` 字段
+- `pass` 时对完成任务做 LLM 摘要，`back_up` 时对退出子树做摘要
+- 面试官开始新任务首问时注入最近 3 个任务摘要（固定大小，不随对话增长）
+
+**Planned 节点 bug 修复（关键）：**
+- `run_turn()` 先检查 planned 兄弟节点，有则直接执行，不调 director — 导演的承诺必须兑现
+- `director_advance()` 调用 `_skip_planned_descendants()` 清理残留 planned → skipped，防止僵尸节点
+
+---
+
+## 21. 知识库问答：Fork 对话树 + 标签页窗口系统
+
+**非线性对话树（初版，2026-03-22）：**
+- 每个 Q+A 是 `ConvNode` 树节点，可在任意节点派生新分支
+- `getPath()` 从叶到根回溯，`submit()` 只用当前路径上下文（无跨分支污染）
+- `handleSummarize()` 只总结当前路径
+
+**标签页窗口系统（2026-03-29）：**
+- 新增 `ConvTab` 类型 `{ id, label, currentId }`，`tabs[]` + `activeTabId` 管理多窗口
+- "⑂ 分叉" 按钮出现在每条 AI 回答上，点击 → 以该节点为起点创建新标签页
+- 右侧面板的分支树节点上也有 ⑂ 按钮，hover 时显示
+- 不同标签页共享同一棵 `nodes` 树（ConvNode），共享分支点前的对话，各自管理 `currentId` 决定自己的上下文路径
+
+**右侧面板重构（2026-03-29）：**
+- 移除浮动 `ConvTree` 组件，移除独立 `NotesSidebar`
+- 新 `RightPanel` 组件整合两个标签："对话树"（可视化分支树 + ⑂ 操作）和"知识笔记"
+- 分支树节点：点击 → 当前标签页跳转该节点；⑂ → fork 出新标签页
+- InfoPanel（面试页实时树）属性标签同步为文字标签（与复盘页一致）
+
+**TODO（待实施）：**
+- 每个标签页/分支可独立一键总结为知识笔记
+
+---
+
 ## 后续路线图（骨架 → 生产）
 
 | 阶段 | 升级项 | 影响 |
