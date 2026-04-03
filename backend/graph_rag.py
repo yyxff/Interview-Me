@@ -42,9 +42,12 @@ _GRAPH_ENTITIES_COL  = "graph_entities"
 _GRAPH_RELATIONS_COL = "graph_relations"
 
 # 检索参数
-ENTITY_TOP_K   = 5
-RELATION_TOP_K = 3
+ENTITY_TOP_K   = 10   # 扩大以抵消实体重复占位（同概念多写法会消耗名额）
+RELATION_TOP_K = 6
 BFS_HOPS       = 1
+
+# 实体去重阈值：名称互相包含或归一化后完全相同时合并，释放 TOP_K 名额给不同实体
+_ENTITY_DEDUP_NORM = str.maketrans("", "", " \t\u3000·・")  # 去除空格/全角空格/间隔号
 
 # 图索引自适应并发起始值（使用 rag.AdaptiveSemaphore，TCP 慢启动风格）
 GRAPH_CONCURRENCY_INITIAL = 1
@@ -587,6 +590,7 @@ def _bfs_neighbors(G, start_nodes: list[str], hops: int) -> list[str]:
     """
     从 start_nodes 出发做 BFS（双向：successors + predecessors）。
     返回邻居节点的 source_chunk_ids 去重列表（不含 start_nodes 自身）。
+    已被 _bfs_neighbors_scored 取代，保留供向后兼容。
     """
     visited   = set(start_nodes)
     frontier  = set(n for n in start_nodes if G.has_node(n))
@@ -608,6 +612,93 @@ def _bfs_neighbors(G, start_nodes: list[str], hops: int) -> list[str]:
         frontier = next_frontier
         if not frontier:
             break
+
+    return chunk_ids
+
+
+# BFS 相似度过滤：保留与 query 最相关的邻居节点
+BFS_NEIGHBOR_TOP_N  = 10   # BFS 展开后最多保留 N 个邻居节点
+BFS_SIMILARITY_THRESHOLD = 0.45  # 余弦相似度阈值（低于此的邻居丢弃）
+
+
+def _bfs_neighbors_scored(
+    G,
+    start_nodes: list[str],
+    hops: int,
+    query_embedding: list[float],
+) -> list[str]:
+    """
+    BFS + 相似度剪枝版本。
+    1. BFS 展开收集所有邻居节点（同 _bfs_neighbors）
+    2. 对每个邻居节点，用其在图中存储的 embedding 计算与 query 的余弦相似度
+    3. 过滤掉相似度低于阈值的节点，再按相似度降序排列，只取 top-N
+    4. 返回这些节点的 source_chunk_ids
+
+    若节点没有存储 embedding，则降级：直接用节点名称 embed 后比较。
+    """
+    import numpy as np
+
+    visited   = set(start_nodes)
+    frontier  = set(n for n in start_nodes if G.has_node(n))
+    neighbors: list[str] = []  # 候选邻居节点名
+
+    for _ in range(hops):
+        next_frontier: set[str] = set()
+        for node in frontier:
+            for nb in list(G.successors(node)) + list(G.predecessors(node)):
+                if nb not in visited:
+                    visited.add(nb)
+                    next_frontier.add(nb)
+                    neighbors.append(nb)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    if not neighbors:
+        return []
+
+    # 对邻居节点打分：用实体向量库查询每个邻居的 embedding
+    # 直接用邻居节点名称批量 embed 再做余弦相似度（利用已有 embedding function）
+    ef = rag._get_ef()
+    try:
+        neighbor_embeddings = ef(neighbors)  # list[list[float]]
+    except Exception:
+        # fallback：无法 embed 时退化为无过滤
+        chunk_ids: list[str] = []
+        seen: set[str] = set()
+        for nb in neighbors[:BFS_NEIGHBOR_TOP_N]:
+            for cid in G.nodes[nb].get("source_chunk_ids", []):
+                if cid not in seen:
+                    seen.add(cid)
+                    chunk_ids.append(cid)
+        return chunk_ids
+
+    q_vec = np.array(query_embedding, dtype=np.float32)
+    q_norm = np.linalg.norm(q_vec)
+    if q_norm == 0:
+        q_norm = 1.0
+
+    scored: list[tuple[float, str]] = []
+    for nb, nb_emb in zip(neighbors, neighbor_embeddings):
+        nb_vec = np.array(nb_emb, dtype=np.float32)
+        nb_norm = np.linalg.norm(nb_vec)
+        if nb_norm == 0:
+            continue
+        sim = float(np.dot(q_vec, nb_vec) / (q_norm * nb_norm))
+        if sim >= BFS_SIMILARITY_THRESHOLD:
+            scored.append((sim, nb))
+
+    # 按相似度降序，取 top-N
+    scored.sort(reverse=True)
+    top_neighbors = [nb for _, nb in scored[:BFS_NEIGHBOR_TOP_N]]
+
+    chunk_ids = []
+    seen: set[str] = set()
+    for nb in top_neighbors:
+        for cid in G.nodes[nb].get("source_chunk_ids", []):
+            if cid not in seen:
+                seen.add(cid)
+                chunk_ids.append(cid)
 
     return chunk_ids
 
@@ -683,6 +774,25 @@ def retrieve_graph(query: str) -> dict:
                 "dist": round(dist, 4),
             })
 
+        # Step 1b: 实体去重——同一概念的多种写法只保留相似度最高的那条
+        # 归一化：去空格/全角空格，转小写，再判断互相包含
+        def _norm_name(n: str) -> str:
+            return n.translate(_ENTITY_DEDUP_NORM).lower()
+
+        deduped_entities: list[dict] = []
+        seen_norms: list[str] = []
+        for e in entities:
+            n = _norm_name(e["name"])
+            # 若与已保留实体存在包含关系（任一方包含另一方），视为重复
+            is_dup = any(
+                n in sn or sn in n
+                for sn in seen_norms
+            )
+            if not is_dup:
+                deduped_entities.append(e)
+                seen_norms.append(n)
+        entities = deduped_entities
+
         # Step 2: 关系向量检索
         relations: list[dict] = []
         if rel_col.count() > 0:
@@ -701,24 +811,40 @@ def retrieve_graph(query: str) -> dict:
                     "dist":      round(dist, 4),
                 })
 
-        # Step 3: 合并去重——只取命中实体 + 命中关系的 chunk（不展开 BFS 邻居）
+        # Step 3: 合并去重——优先关系 chunk（最精确），再实体 chunk，最后 BFS 邻居
+        # 顺序很重要：relation 向量直接命中了边 → 其 source_chunk_id 最相关，排最前
         G = _get_nx_graph()
         all_chunk_ids: list[str] = []
         seen: set[str] = set()
 
-        for e in entities:
-            for cid in e["source_chunk_ids"]:
-                if cid not in seen:
-                    seen.add(cid)
-                    all_chunk_ids.append(cid)
-
+        # 1) 关系 chunk 优先（relation 向量直接对应一条边及其 chunk）
         for r in relations:
             cid = r["source_chunk_id"]
             if cid and cid not in seen:
                 seen.add(cid)
                 all_chunk_ids.append(cid)
 
-        # Step 4: 图谱摘要（BFS 邻居只用于摘要文字，不加入 chunk 上下文）
+        # 2) 实体 chunk
+        for e in entities:
+            for cid in e["source_chunk_ids"]:
+                if cid not in seen:
+                    seen.add(cid)
+                    all_chunk_ids.append(cid)
+
+        # 3) BFS 展开（带相似度剪枝）：只保留与 query 最相关的邻居节点
+        entity_names = [e["name"] for e in entities]
+        try:
+            query_emb = rag._get_ef()([query])[0]
+            bfs_chunk_ids = _bfs_neighbors_scored(G, entity_names, BFS_HOPS, query_emb)
+        except Exception:
+            # fallback：embedding 失败时退化为无过滤 BFS
+            bfs_chunk_ids = _bfs_neighbors(G, entity_names, BFS_HOPS)
+        for cid in bfs_chunk_ids:
+            if cid not in seen:
+                seen.add(cid)
+                all_chunk_ids.append(cid)
+
+        # Step 4: 图谱摘要
         graph_summary = _build_graph_summary(entities, relations, G)
 
         return {

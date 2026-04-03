@@ -16,8 +16,10 @@ backend/notes/
 backend/qa_sessions/
 # 图谱数据（本地生成，可重建）
 backend/graph/
-# 评测日志（本地产物）
+# 评测日志和测试集（本地产物，数据量大）
 backend/eval_logs/
+experiments/rag/logs/
+experiments/rag/testsets/
 # 用户 profile（简历等，本地数据）
 backend/profile/
 resume.md

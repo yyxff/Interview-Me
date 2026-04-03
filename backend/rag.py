@@ -14,6 +14,7 @@ Embedding: BAAI/bge-small-zh-v1.5 (本地，首次使用自动下载 ~130MB)
 
 from __future__ import annotations
 
+import asyncio
 import re
 import tempfile
 from pathlib import Path
@@ -770,15 +771,19 @@ def retrieve_rich(
     query: str,
     session_id: str | None = None,
     extra_chunks: list[dict] | None = None,
+    top_k: int | None = None,
+    path_map: dict[str, str] | None = None,
 ) -> dict:
     """
     精准模式检索流程：
       bi-encoder 召回 → 阈值过滤 → 去重
       + extra_chunks（图谱召回）
-      → RRF 融合排序 → cross-encoder 重排 → 取 top-K
+      → RRF 融合排序 → cross-encoder 重排（含证据链前置）→ 取 top-K
 
     extra_chunks: 图谱召回的 chunk 列表，每项含 {text, source, path, chapter, chunk_id}，
                   按图谱命中排名顺序传入（最相关在前）。
+    path_map: {chunk_id: 证据链文本}，有路径的 chunk 在 rerank 前将路径文本前置，
+              帮助 cross-encoder 理解关系型查询（A→B 中 query 提 A、chunk 讲 B 的情形）。
 
     返回:
         {
@@ -790,16 +795,17 @@ def retrieve_rich(
     if not is_available():
         return {"knowledge": [], "resume": []}
 
+    k = top_k if top_k is not None else KNOWLEDGE_TOP_K
     knowledge: list[dict] = []
     retrieval_log: list[dict] = []   # 供调用方打日志
     try:
         col = _get_knowledge_col()
         if col.count() > 0:
             # Step 1: bi-encoder 召回
-            n_candidates = min(KNOWLEDGE_TOP_K * QA_PER_CHUNK * 2, col.count())
+            n_candidates = min(k * QA_PER_CHUNK * 2, col.count())
             raw_with_dist = _safe_query(col, query, n_candidates, return_distances=True)
             raw = [(d, m) for d, m, _ in raw_with_dist]
-            candidates = _dedupe_chunks(raw, limit=KNOWLEDGE_TOP_K * 3)
+            candidates = _dedupe_chunks(raw, limit=k * 3)
             dist_map = {m.get("chunk_id", ""): dist for d, m, dist in raw_with_dist}
 
             # Step 2: 构建 chunk 数据字典（chunk_id → (text, meta)）
@@ -846,13 +852,21 @@ def retrieve_rich(
                 merged_ids = be_rank
 
             # Step 5: 取 top-N 送 cross-encoder rerank
-            RERANK_LIMIT = max(KNOWLEDGE_TOP_K * 4, 15)
+            # 有 path_map 的 chunk 前置证据链文本，帮助 reranker 理解关系型查询
+            RERANK_LIMIT = max(k * 4, 15)
             rerank_cids = [cid for cid in merged_ids if cid in cand_map][:RERANK_LIMIT]
-            rerank_inputs = [(cand_map[cid][0], cand_map[cid][1]) for cid in rerank_cids]
+            rerank_inputs = []
+            for cid in rerank_cids:
+                raw_text, meta = cand_map[cid]
+                if path_map and cid in path_map:
+                    enriched = path_map[cid] + "\n\n" + raw_text
+                else:
+                    enriched = raw_text
+                rerank_inputs.append((enriched, meta))
             ranked = rerank(query, rerank_inputs)
 
             be_cid_set = set(be_rank)
-            for doc, meta, score in ranked[:KNOWLEDGE_TOP_K]:
+            for doc, meta, score in ranked[:k]:
                 cid = meta.get("chunk_id", "")
                 graph_only = cid in extra_map and cid not in be_cid_set
                 knowledge.append({

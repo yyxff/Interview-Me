@@ -519,6 +519,7 @@ async def qa_stream(req: QARequest):
                 print(f"  relation  {entry.get('triple','')}  dist={entry.get('dist',-1):.4f}")
 
     # 图谱 chunk_ids → 原文（供 RRF 融合）
+    # 同时构建 path_map：chunk_id → 证据链文本（用于 contextualized reranking）
     graph_extra: list[dict] = []
     graph_viz: dict = {}
     try:
@@ -530,11 +531,24 @@ async def qa_stream(req: QARequest):
             graph_viz = _gr.get_subgraph_for_viz(retrieval_query)
     except Exception:
         pass
+
+    # 构建证据链 path_map：每条图谱关系拼成自然语言，前置到对应 chunk 文本
+    # 让 cross-encoder reranker 能看到完整推理链（A --predicate--> B），
+    # 解决关系型查询中 reranker 因"query 提 A、chunk 讲 B"而误判的问题
+    path_map: dict[str, str] = {}
+    for r in graph_result.get("relations", []):
+        cid = r.get("source_chunk_id", "")
+        if cid and cid not in path_map:
+            path_map[cid] = (
+                f"[图谱路径] {r['subject']} --{r['predicate']}--> {r['object']}。"
+                f"{r.get('description', '')}"
+            )
     if graph_summary:
         print(f"[graph] summary → {graph_summary}")
 
     # ── 精准模式：bi-encoder + graph → RRF → cross-encoder rerank ────────────
-    result    = rag.retrieve_rich(retrieval_query, extra_chunks=graph_extra or None)
+    result    = rag.retrieve_rich(retrieval_query, extra_chunks=graph_extra or None,
+                                  path_map=path_map or None)
     knowledge = result["knowledge"]
     notes     = result.get("notes", [])
 
