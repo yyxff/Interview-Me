@@ -1,6 +1,6 @@
 """rag 包 — 向量检索增强生成"""
 from .client import (
-    CHROMA_PATH, KNOWLEDGE_DIR, NOTES_DIR,
+    QDRANT_PATH, KNOWLEDGE_DIR, NOTES_DIR,
     _KNOWLEDGE_COL, _RESUME_COL, _NOTES_COL,
     KNOWLEDGE_TOP_K, RESUME_TOP_K, QA_PER_CHUNK,
     is_available,
@@ -29,7 +29,7 @@ from .profile import save_profile, get_profile_text, profile_status
 
 __all__ = [
     # client
-    "CHROMA_PATH", "KNOWLEDGE_DIR", "NOTES_DIR",
+    "QDRANT_PATH", "KNOWLEDGE_DIR", "NOTES_DIR",
     "KNOWLEDGE_TOP_K", "RESUME_TOP_K", "QA_PER_CHUNK",
     "is_available",
     "_get_client", "_get_ef", "_get_knowledge_col", "_get_resume_col", "_get_notes_col",

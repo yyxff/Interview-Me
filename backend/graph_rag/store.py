@@ -1,4 +1,4 @@
-"""Graph RAG — ChromaDB 单例、NetworkX 图、进度追踪"""
+"""Graph RAG — Qdrant 单例（通过 rag._get_client() 适配器）、NetworkX 图、进度追踪"""
 from __future__ import annotations
 
 import json
