@@ -38,6 +38,7 @@ import routes.knowledge as _knowledge
 import routes.graph as _graph
 import routes.notes as _notes
 import routes.interview as _interview
+import routes.lg_interview as _lg_interview  # LangGraph 版
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +70,7 @@ app.include_router(graph_router)
 app.include_router(notes_router)
 app.include_router(qa_sessions_router)
 app.include_router(interview_router)
+app.include_router(_lg_interview.router)   # LangGraph 版：/v2/interview/*
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
