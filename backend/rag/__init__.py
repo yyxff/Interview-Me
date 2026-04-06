@@ -17,7 +17,7 @@ from .indexing import (
 )
 from .retrieval import (
     SIMILARITY_DISTANCE_THRESHOLD,
-    _safe_query, _dedupe_chunks,
+    _safe_query, _rrf_merge, _dedupe_chunks,
     retrieve, retrieve_rich, retrieve_graph,
     has_resume, knowledge_count,
 )
@@ -43,7 +43,7 @@ __all__ = [
     "backfill_qa_cache", "index_knowledge", "AdaptiveSemaphore",
     "LLM_TIMEOUT", "_is_ratelimit",
     # retrieval
-    "SIMILARITY_DISTANCE_THRESHOLD", "_safe_query",
+    "SIMILARITY_DISTANCE_THRESHOLD", "_safe_query", "_rrf_merge",
     "retrieve", "retrieve_rich", "retrieve_graph",
     "has_resume", "knowledge_count",
     # notes

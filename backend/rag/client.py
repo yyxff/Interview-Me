@@ -266,14 +266,16 @@ class _QdrantCol:
         ).points
 
         # ── dense-only 分数（用于 cosine distance 阈值兼容） ─────────────────
-        dense_hits  = self._q.search(
+        # qdrant-client ≥ 1.10 移除了 search()，改用 query_points(query=vec, using=...)
+        dense_result = self._q.query_points(
             collection_name = self._name,
-            query_vector    = ("dense", dvec),
+            query           = dvec,
+            using           = "dense",
             limit           = over,
             with_payload    = False,
             query_filter    = qf,
         )
-        dense_score = {p.id: p.score for p in dense_hits}
+        dense_score = {p.id: p.score for p in dense_result.points}
 
         docs, metas, dists = [], [], []
         for p in hybrid_pts:
