@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .client import (
-    is_available, KNOWLEDGE_TOP_K, RESUME_TOP_K, QA_PER_CHUNK,
+    is_available, KNOWLEDGE_TOP_K, KNOWLEDGE_RETURN_K, RESUME_TOP_K, QA_PER_CHUNK,
     _get_knowledge_col, _get_resume_col, _get_notes_col,
     rerank,
 )
@@ -68,16 +68,21 @@ def retrieve_rich(
     session_id: str | None = None,
     extra_chunks: list[dict] | None = None,
     top_k: int | None = None,
+    return_k: int | None = None,
     path_map: dict[str, str] | None = None,
 ) -> dict:
     """
     精准模式检索：bi-encoder → 阈值过滤 → 去重 + 图谱 extra_chunks
     → RRF 融合 → cross-encoder rerank → top-K
+
+    top_k:    候选池深度（影响 n_candidates / dedupe / rerank 窗口）
+    return_k: 最终返回给 LLM 的 chunk 数，默认 KNOWLEDGE_RETURN_K
     """
     if not is_available():
         return {"knowledge": [], "resume": [], "notes": [], "retrieval_log": []}
 
-    k = top_k if top_k is not None else KNOWLEDGE_TOP_K
+    k  = top_k    if top_k    is not None else KNOWLEDGE_TOP_K
+    rk = return_k if return_k is not None else KNOWLEDGE_RETURN_K
     knowledge: list[dict] = []
     retrieval_log: list[dict] = []
 
@@ -111,6 +116,7 @@ def retrieve_rich(
                                 "chapter": c.get("chapter", ""), "question": "",
                             })
 
+            graph_rank = graph_rank[:k * 3]   # 与 be_rank 上限对等，避免图路压制向量路
             be_only  = len(be_rank)
             gph_only = sum(1 for cid in graph_rank if cid not in set(be_rank))
             overlap  = sum(1 for cid in graph_rank if cid in set(be_rank))
@@ -136,7 +142,7 @@ def retrieve_rich(
             ranked = rerank(query, rerank_inputs)
 
             be_cid_set = set(be_rank)
-            for doc, meta, score in ranked[:k]:
+            for doc, meta, score in ranked[:rk]:
                 cid        = meta.get("chunk_id", "")
                 graph_only = cid in extra_map and cid not in be_cid_set
                 knowledge.append({

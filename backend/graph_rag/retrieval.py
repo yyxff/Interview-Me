@@ -188,6 +188,14 @@ def retrieve_graph(query: str) -> dict:
                 seen.add(cid)
                 all_chunk_ids.append(cid)
 
+            # relation 涉及的两个实体节点的 chunk
+            for node_name in (r["subject"], r["object"]):
+                if G.has_node(node_name):
+                    for cid in G.nodes[node_name].get("source_chunk_ids", []):
+                        if cid not in seen:
+                            seen.add(cid)
+                            all_chunk_ids.append(cid)
+
         for e in entities:
             for cid in e["source_chunk_ids"]:
                 if cid not in seen:

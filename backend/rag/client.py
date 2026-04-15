@@ -32,9 +32,10 @@ _RESUME_COL    = "resumes"
 _NOTES_COL     = "notes"
 
 # 检索参数
-KNOWLEDGE_TOP_K = 3
-RESUME_TOP_K    = 2
-QA_PER_CHUNK    = 4
+KNOWLEDGE_TOP_K    = 5   # 候选池深度（影响 n_candidates / dedupe / rerank 窗口）
+KNOWLEDGE_RETURN_K = 5   # 最终返回给 LLM 的 chunk 数（可独立于 TOP_K 调整）
+RESUME_TOP_K       = 2
+QA_PER_CHUNK       = 4
 
 # UUID namespace（固定，保证同一 string id 始终映射到同一 UUID）
 _NS = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")

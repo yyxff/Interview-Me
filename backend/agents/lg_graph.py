@@ -239,11 +239,11 @@ def _make_plan_tools(state: InterviewState) -> list:
             import sys
             sys.path.insert(0, str(Path(__file__).parent.parent))
             import rag  # 复用原有 RAG 模块
-            result = rag.retrieve_rich(query, top_k=3)
+            result = rag.retrieve_rich(query)
             if not result:
                 return "知识库无相关内容"
             return "\n---\n".join(
-                f"[{r.get('source', '?')}]\n{r.get('text', '')}" for r in result[:3]
+                f"[{r.get('source', '?')}]\n{r.get('text', '')}" for r in result
             )
         except Exception as e:
             return f"搜索失败: {e}"
@@ -283,11 +283,11 @@ def _make_ask_tools(state: InterviewState) -> list:
             import sys
             sys.path.insert(0, str(Path(__file__).parent.parent))
             import rag
-            result = rag.retrieve_rich(query, top_k=3)
+            result = rag.retrieve_rich(query)
             if not result:
                 return "知识库无相关内容"
             return "\n---\n".join(
-                f"[{r.get('source', '?')}]\n{r.get('text', '')}" for r in result[:3]
+                f"[{r.get('source', '?')}]\n{r.get('text', '')}" for r in result
             )
         except Exception as e:
             return f"搜索失败: {e}"

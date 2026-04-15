@@ -2,7 +2,7 @@
 from .client import (
     QDRANT_PATH, KNOWLEDGE_DIR, NOTES_DIR,
     _KNOWLEDGE_COL, _RESUME_COL, _NOTES_COL,
-    KNOWLEDGE_TOP_K, RESUME_TOP_K, QA_PER_CHUNK,
+    KNOWLEDGE_TOP_K, KNOWLEDGE_RETURN_K, RESUME_TOP_K, QA_PER_CHUNK,
     is_available,
     _get_client, _get_ef, _get_reranker,
     _get_knowledge_col, _get_resume_col, _get_notes_col,
@@ -30,7 +30,7 @@ from .profile import save_profile, get_profile_text, profile_status
 __all__ = [
     # client
     "QDRANT_PATH", "KNOWLEDGE_DIR", "NOTES_DIR",
-    "KNOWLEDGE_TOP_K", "RESUME_TOP_K", "QA_PER_CHUNK",
+    "KNOWLEDGE_TOP_K", "KNOWLEDGE_RETURN_K", "RESUME_TOP_K", "QA_PER_CHUNK",
     "is_available",
     "_get_client", "_get_ef", "_get_knowledge_col", "_get_resume_col", "_get_notes_col",
     "rerank",

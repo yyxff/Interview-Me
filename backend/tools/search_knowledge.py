@@ -25,7 +25,7 @@ def make(session: "InterviewSession") -> dict:
             for rel in gr.get("relations", []) if rel.get("source_chunk_id")
         }
         r = _rag.retrieve_rich(query, extra_chunks=extra or None, path_map=path_map or None)
-        chunks = r.get("knowledge", [])[:3]
+        chunks = r.get("knowledge", [])
         if not chunks:
             return "知识库中未找到相关内容"
         return "\n".join(
