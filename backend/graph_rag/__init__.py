@@ -10,7 +10,7 @@ from .store import (
 from .builder import (
     _build_entity_embed_text, _build_relation_embed_text,
     _build_graph_for_source, _save_graph, _load_graph,
-    _index_graph_to_chroma,
+    _index_graph_to_qdrant,
     index_knowledge_graph,
 )
 from .retrieval import (
@@ -25,7 +25,7 @@ __all__ = [
     "get_graph_index_progress",
     # builder
     "index_knowledge_graph",
-    "_save_graph", "_load_graph", "_index_graph_to_chroma",
+    "_save_graph", "_load_graph", "_index_graph_to_qdrant",
     # retrieval
     "retrieve_graph", "get_chunks_by_ids",
     "get_subgraph_for_viz", "graph_stats",

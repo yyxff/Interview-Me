@@ -1,4 +1,4 @@
-"""Graph RAG — 图构建、持久化、ChromaDB 索引、主索引入口"""
+"""Graph RAG — 图构建、持久化、Qdrant 索引、主索引入口"""
 from __future__ import annotations
 
 import asyncio
@@ -110,7 +110,7 @@ def _load_graph(source: str) -> dict | None:
         return None
 
 
-def _clear_chroma_for_source(col, source: str) -> None:
+def _clear_vectors_for_source(col, source: str) -> None:
     try:
         existing = col.get(where={"source": source})
         if existing["ids"]:
@@ -119,14 +119,14 @@ def _clear_chroma_for_source(col, source: str) -> None:
         pass
 
 
-def _index_graph_to_chroma(graph: dict) -> None:
-    """将图的实体和关系分别向量化存入 ChromaDB。"""
+def _index_graph_to_qdrant(graph: dict) -> None:
+    """将图的实体和关系分别向量化存入 Qdrant（Dense + Sparse 双向量）。"""
     source  = graph["source"]
     ent_col = _get_entities_col()
     rel_col = _get_relations_col()
 
-    _clear_chroma_for_source(ent_col, source)
-    _clear_chroma_for_source(rel_col, source)
+    _clear_vectors_for_source(ent_col, source)
+    _clear_vectors_for_source(rel_col, source)
 
     ent_ids, ent_docs, ent_metas = [], [], []
     for name, attrs in graph.get("nodes", {}).items():
@@ -165,7 +165,7 @@ def _index_graph_to_chroma(graph: dict) -> None:
     if rel_ids:
         rel_col.add(ids=rel_ids, documents=rel_docs, metadatas=rel_metas)
 
-    print(f"[graph_rag] Chroma 索引: {source} → {len(ent_ids)} 实体向量, {len(rel_ids)} 关系向量")
+    print(f"[graph_rag] Qdrant 索引: {source} → {len(ent_ids)} 实体向量, {len(rel_ids)} 关系向量")
 
 
 # ── 主索引入口 ────────────────────────────────────────────────────────────────
@@ -261,7 +261,7 @@ async def index_knowledge_graph(provider: "LLMProvider") -> dict:
             results   = await asyncio.gather(*[_extract_one(i) for i in range(len(chunks))])
             graph     = _build_graph_for_source(source, list(results))
             _save_graph(source, graph)
-            _index_graph_to_chroma(graph)
+            _index_graph_to_qdrant(graph)
             if partial_path.exists():
                 partial_path.unlink()
 

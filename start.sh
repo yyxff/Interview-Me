@@ -41,7 +41,7 @@ RED='\033[0;31m'; DIM='\033[2m'; RST='\033[0m'
 # ---- Banner ----
 echo -e "${BLU}"
 echo "  ╔══════════════════════════════════╗"
-echo "  ║     Interview Me  模拟面试        ║"
+echo "  ║     Interview Me  模拟面试       ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${RST}"
 

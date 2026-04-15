@@ -1,6 +1,6 @@
 """rag 包 — 向量检索增强生成"""
 from .client import (
-    CHROMA_PATH, KNOWLEDGE_DIR, NOTES_DIR,
+    QDRANT_PATH, KNOWLEDGE_DIR, NOTES_DIR,
     _KNOWLEDGE_COL, _RESUME_COL, _NOTES_COL,
     KNOWLEDGE_TOP_K, RESUME_TOP_K, QA_PER_CHUNK,
     is_available,
@@ -17,7 +17,7 @@ from .indexing import (
 )
 from .retrieval import (
     SIMILARITY_DISTANCE_THRESHOLD,
-    _safe_query, _dedupe_chunks,
+    _safe_query, _rrf_merge, _dedupe_chunks,
     retrieve, retrieve_rich, retrieve_graph,
     has_resume, knowledge_count,
 )
@@ -29,7 +29,7 @@ from .profile import save_profile, get_profile_text, profile_status
 
 __all__ = [
     # client
-    "CHROMA_PATH", "KNOWLEDGE_DIR", "NOTES_DIR",
+    "QDRANT_PATH", "KNOWLEDGE_DIR", "NOTES_DIR",
     "KNOWLEDGE_TOP_K", "RESUME_TOP_K", "QA_PER_CHUNK",
     "is_available",
     "_get_client", "_get_ef", "_get_knowledge_col", "_get_resume_col", "_get_notes_col",
@@ -43,7 +43,7 @@ __all__ = [
     "backfill_qa_cache", "index_knowledge", "AdaptiveSemaphore",
     "LLM_TIMEOUT", "_is_ratelimit",
     # retrieval
-    "SIMILARITY_DISTANCE_THRESHOLD", "_safe_query",
+    "SIMILARITY_DISTANCE_THRESHOLD", "_safe_query", "_rrf_merge",
     "retrieve", "retrieve_rich", "retrieve_graph",
     "has_resume", "knowledge_count",
     # notes

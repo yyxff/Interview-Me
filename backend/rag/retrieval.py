@@ -40,6 +40,16 @@ def _safe_query(
         return []
 
 
+def _rrf_merge(rank_lists: list[list[str]], k: int = 60) -> list[str]:
+    """标准 RRF 融合多路排名列表，返回按综合分数降序的 chunk_id 列表。"""
+    scores: dict[str, float] = {}
+    for ranked_list in rank_lists:
+        for rank, cid in enumerate(ranked_list, start=1):
+            if cid:
+                scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
+    return sorted(scores, key=lambda c: scores[c], reverse=True)
+
+
 def _dedupe_chunks(raw: list[tuple[str, dict]], limit: int) -> list[tuple[str, dict]]:
     seen: set[str] = set()
     result: list[tuple[str, dict]] = []
