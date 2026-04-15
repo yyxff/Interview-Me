@@ -1,8 +1,8 @@
 """
-路由：/v2/interview/*  （LangGraph 版）
+路由：/interview/*  （LangGraph 版）
 ======================================
 
-对应原来的 routes/interview.py，但状态管理完全交给 LangGraph。
+取代原来的 routes/interview.py，状态管理完全交给 LangGraph。
 
 核心变化对比：
 ┌──────────────────────────────────────────────────────────────────┐
@@ -16,12 +16,12 @@
 
 LangGraph interrupt 机制与 HTTP 的对应关系：
 
-  POST /v2/interview/start
+  POST /interview/start
     → graph.ainvoke(initial_state, config)
     → 图跑到 ask_node 里的 interrupt(question)
     → 返回 question 给前端
 
-  POST /v2/interview/chat  { session_id, message }
+  POST /interview/chat  { session_id, message }
     → graph.ainvoke(Command(resume=message), config)
     → 图从 interrupt() 处继续：score → decide → ask → interrupt(next_q)
     → 返回 next_q 给前端（或 done=True）
@@ -39,12 +39,9 @@ from pydantic import BaseModel
 import rag as _rag
 
 # 导入 LangGraph 图 + 必要的类型
-from agents.lg_graph import (
-    InterviewState,
-    interview_graph,
-    tree_to_dict,
-    _dict_to_node,
-)
+from agents.state import InterviewState, _dict_to_node
+from agents.graph import interview_graph
+from agents.models import tree_to_dict
 from langgraph.types import Command
 
 router = APIRouter()
@@ -109,7 +106,7 @@ async def _get_current_state(config: dict) -> InterviewState:
 # 路由
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/v2/interview/start")
+@router.post("/interview/start")
 async def lg_interview_start(req: StartRequest):
     """
     开始面试。
@@ -120,7 +117,6 @@ async def lg_interview_start(req: StartRequest):
       3. 调用 graph.astream() → 跑到第一个 interrupt → 返回第一道题
     """
     session_id = str(uuid.uuid4())
-    # ⑥ config 里的 thread_id 是 LangGraph checkpointer 的会话标识
     config = {"configurable": {"thread_id": session_id}}
 
     # 构建初始 state（所有字段必须存在）
@@ -155,7 +151,7 @@ async def lg_interview_start(req: StartRequest):
     }
 
 
-@router.post("/v2/interview/chat")
+@router.post("/interview/chat")
 async def lg_interview_chat(req: ChatRequest):
     """
     提交候选人的回答，获取下一道题。
@@ -168,8 +164,6 @@ async def lg_interview_chat(req: ChatRequest):
     config = {"configurable": {"thread_id": req.session_id}}
 
     try:
-        # Command(resume=value) 是 LangGraph 恢复 interrupt 的标准方式
-        # value 会成为 interrupt() 调用处的返回值
         next_question, _ = await _run_until_interrupt(
             Command(resume=req.message),
             config,
@@ -199,6 +193,101 @@ async def lg_interview_chat(req: ChatRequest):
     }
 
 
+@router.post("/interview/session/{session_id}/save")
+async def lg_interview_session_save(session_id: str):
+    """
+    保存当前 session 到 JSON 文件。
+    LangGraph 版：从 checkpointer 读取当前 state 并写入磁盘。
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        state = await _get_current_state(config)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Session 不存在: {e}")
+
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    path = _save_session(state)
+    return {"filename": path.name}
+
+
+@router.get("/interview/results")
+def lg_interview_results_list():
+    """列出所有已保存的面试结果文件。"""
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(SESSIONS_DIR.glob("*.json"), reverse=True)
+    results = []
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            tree = d.get("tree", [])
+            scores = [
+                n["score"]
+                for n in _flat_dict(tree)
+                if n.get("score") is not None
+            ]
+            results.append({
+                "filename":   f.name,
+                "saved_at":   d.get("saved_at", ""),
+                "direction":  d.get("direction", ""),
+                "jd_snippet": d.get("jd", "")[:60],
+                "sm_state":   d.get("sm_final", {}).get("state", ""),
+                "task_count": sum(1 for n in tree if n.get("node_type") == "task"),
+                "avg_score":  round(sum(scores) / len(scores), 1) if scores else None,
+            })
+        except Exception:
+            results.append({
+                "filename": f.name, "saved_at": "", "direction": "",
+                "jd_snippet": "", "sm_state": "", "task_count": 0, "avg_score": None,
+            })
+    return {"results": results}
+
+
+@router.get("/interview/results/{filename}")
+def lg_interview_result_get(filename: str):
+    """返回指定结果文件的完整 JSON 内容。"""
+    path = SESSIONS_DIR / filename
+    if not path.exists() or path.suffix != ".json":
+        raise HTTPException(status_code=404, detail="结果文件不存在")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@router.delete("/interview/results/{filename}")
+def lg_interview_result_delete(filename: str):
+    """删除指定结果文件。"""
+    path = SESSIONS_DIR / filename
+    if not path.exists() or path.suffix != ".json":
+        raise HTTPException(status_code=404, detail="结果文件不存在")
+    path.unlink()
+    return {"ok": True}
+
+
+@router.get("/interview/session/{session_id}")
+async def lg_interview_session_get(session_id: str):
+    """
+    返回当前 session 的状态树（与旧版 GET /interview/session/{session_id} 响应格式兼容）。
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        state = await _get_current_state(config)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Session 不存在: {e}")
+
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    roots = [_dict_to_node(d) for d in state.get("roots_data", [])]
+    return {
+        "session_id": session_id,
+        "sm": {
+            "state": "DONE" if state.get("last_verdict") == "end" else "ANSWERING",
+        },
+        "tree": tree_to_dict(roots),
+        "sm_log": [],
+    }
+
+
 @router.get("/v2/interview/session/{session_id}/state")
 async def lg_get_state(session_id: str):
     """调试接口：查看当前 session 的完整 state。"""
@@ -220,11 +309,25 @@ async def lg_get_state(session_id: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 工具函数：递归展平树节点（供 results 列表接口计算分数用）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _flat_dict(nodes: list[dict]) -> list[dict]:
+    """递归展平树节点列表（dict 格式）。"""
+    result = []
+    for n in nodes:
+        result.append(n)
+        result.extend(_flat_dict(n.get("children", [])))
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 会话保存（面试结束时写入 JSON 文件，与原版格式兼容）
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _save_session(state: dict) -> None:
-    """将面试结果保存为 JSON（格式与原版兼容）。"""
+def _save_session(state: dict) -> Path:
+    """将面试结果保存为 JSON（格式与原版兼容）。返回保存路径。"""
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     session_id = state.get("session_id", "unknown")
     path = SESSIONS_DIR / f"{ts}_{session_id[:8]}_lg.json"
@@ -247,3 +350,4 @@ def _save_session(state: dict) -> None:
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[session saved] {path}")
+    return path

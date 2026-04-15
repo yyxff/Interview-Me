@@ -4,7 +4,7 @@ from .knowledge import router as knowledge_router
 from .graph import router as graph_router
 from .notes import router as notes_router
 from .qa_sessions import router as qa_sessions_router
-from .interview import router as interview_router
+from .lg_interview import router as interview_router
 
 __all__ = [
     "chat_router",

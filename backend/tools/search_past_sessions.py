@@ -15,7 +15,16 @@ DESC = (
 
 def make(session: "InterviewSession") -> dict:
     async def fn(query: str) -> str:
-        from interview_agent import SESSIONS_DIR, _flat_dict
+        from pathlib import Path as _Path
+
+        SESSIONS_DIR = _Path(__file__).parent.parent / "sessions"
+
+        def _flat_dict(nodes: list) -> list:
+            result = []
+            for n in nodes:
+                result.append(n)
+                result.extend(_flat_dict(n.get("children", [])))
+            return result
 
         files = sorted(SESSIONS_DIR.glob("*.json"), reverse=True)
         results: list[str] = []

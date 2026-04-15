@@ -37,20 +37,17 @@ import routes.qa as _qa
 import routes.knowledge as _knowledge
 import routes.graph as _graph
 import routes.notes as _notes
-import routes.interview as _interview
-import routes.lg_interview as _lg_interview  # LangGraph 版
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 
 _provider = build_provider()
 
-# 注入 provider 到所有需要它的路由模块
+# 注入 provider 到所有需要它的路由模块（lg_interview 通过 _build_llm() 读取环境变量，无需注入）
 _chat.set_provider(_provider)
 _qa.set_provider(_provider)
 _knowledge.set_provider(_provider)
 _graph.set_provider(_provider)
 _notes.set_provider(_provider)
-_interview.set_provider(_provider)
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -69,8 +66,7 @@ app.include_router(knowledge_router)
 app.include_router(graph_router)
 app.include_router(notes_router)
 app.include_router(qa_sessions_router)
-app.include_router(interview_router)
-app.include_router(_lg_interview.router)   # LangGraph 版：/v2/interview/*
+app.include_router(interview_router)  # LangGraph 版：/interview/*
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
