@@ -5,9 +5,11 @@ frontend/dist/
 *.pyc
 .env
 .DS_Store
+.vscode/
 .claude/
 # 向量库数据及备份（本地生成，不入库）
 backend/chroma_db*/
+backend/qdrant_db*/
 # 上传的知识文件（EPUB 等）
 backend/knowledge/
 # 用户笔记（本地数据）
