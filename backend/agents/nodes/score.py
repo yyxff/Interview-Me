@@ -4,15 +4,19 @@ score_node：Scorer 评分
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.prebuilt import create_react_agent
 
 from agents.models import ThoughtNode, find
 
 from ..llm import _build_llm
 from ..state import InterviewState, _dict_to_node, _node_to_dict, _parse_json
+from ..tools import _make_score_tools
 
 
 _SCORE_SYSTEM = """\
 你是面试评分员，客观评分并给出逐点分析，不做策略决策。
+
+你可以先搜索知识库，获取该题目的标准答案作为评分参考。
 
 评分标准（1-5分）：
 5分：准确完整，有深度，能说明原理并举例
@@ -50,24 +54,22 @@ async def score_node(state: InterviewState) -> dict:
     """
     ── Node③：Scorer 评分 ──────────────────────────────────────────────
 
-    演示要点：最简单的 LangGraph 节点 —— 直接 llm.ainvoke()，不需要工具
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  llm.ainvoke([SystemMessage(...), HumanMessage(...)])           │
-    │  ↑ 这是 LangChain LLM 的标准调用方式                            │
-    │  返回 AIMessage，.content 取文本内容                             │
-    └─────────────────────────────────────────────────────────────────┘
+    使用 create_react_agent：评分前可主动搜索知识库获取标准答案作为参考。
     """
     roots, qnode, task_node = _get_score_context(state)
     if qnode is None:
         return {"last_score": 3}
 
-    result = await _build_llm().ainvoke([
-        SystemMessage(content=_SCORE_SYSTEM),
-        HumanMessage(content=_build_score_prompt(task_node, qnode)),
-    ])
+    llm = _build_llm()
+    tools = _make_score_tools(state)
+    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_SYSTEM))
+
+    result = await react_agent.ainvoke({
+        "messages": [HumanMessage(content=_build_score_prompt(task_node, qnode))]
+    })
 
     score_data = _parse_json(
-        result.content,
+        result["messages"][-1].content,
         default={"score": 3, "reasoning": "解析失败", "feedback": ""},
     )
     score = max(1, min(5, int(score_data.get("score", 3))))
