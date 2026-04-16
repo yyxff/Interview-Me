@@ -1,7 +1,9 @@
 """
-score_node：Scorer 评分
+score_node：Scorer 评分（Critic-Actor Loop）
 """
 from __future__ import annotations
+
+import json
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -28,6 +30,32 @@ _SCORE_SYSTEM = """\
 输出 JSON（不加代码块）：
 {"score": 3, "reasoning": "候选人提到了...", "feedback": "掌握了...，但缺少..."}"""
 
+_SCORE_CRITIC_SYSTEM = """\
+你是评分审查员。如有必要，可先搜索知识库核实技术细节的准确性。
+
+检查下面这个评分是否准确公平：
+1. reasoning 有没有幻觉（捏造候选人没说过的内容）？
+2. score 与 reasoning 是否自洽？（如"方向正确但有遗漏"打了1分，属于矛盾）
+3. feedback 是否具体有建设性，而不是泛泛而谈？
+
+输出 JSON（不加代码块）：
+{"approved": true, "critique": "（如不通过，说明具体问题；通过则留空）"}"""
+
+_SCORE_REVISE_SYSTEM = """\
+你是面试评分员。审查员对你的初步评分提出了意见，请根据意见修正。
+
+评分标准（1-5分）：
+5分：准确完整，有深度，能说明原理并举例
+4分：覆盖核心要点，表述清晰，基本无遗漏
+3分：方向正确但有明显遗漏，或表述模糊
+2分：只了解表面概念，细节错误或不知道原理
+1分：答非所问，或完全不了解
+
+输出 JSON（不加代码块）：
+{"score": 3, "reasoning": "...", "feedback": "..."}"""
+
+_MAX_CRITIC_ROUNDS = 2
+
 
 # ── 上下文函数 ────────────────────────────────────────────────────────────────
 
@@ -48,13 +76,46 @@ def _build_score_prompt(task_node: ThoughtNode | None, qnode: ThoughtNode) -> st
     )
 
 
+async def _critic(llm, tools, question: str, answer: str, current: dict) -> dict:
+    """Critic：审查当前评分，输出 {approved, critique}。可调工具核实技术细节。"""
+    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_CRITIC_SYSTEM))
+    result = await react_agent.ainvoke({
+        "messages": [HumanMessage(content=(
+            f"面试问题：{question}\n"
+            f"候选人回答：{answer[:600]}\n"
+            f"当前评分：{json.dumps(current, ensure_ascii=False)}"
+        ))]
+    })
+    return _parse_json(result["messages"][-1].content, default={"approved": True, "critique": ""})
+
+
+async def _revise(llm, question: str, answer: str, current: dict, critique: str) -> dict:
+    """Actor 修正：评分员看到 critique 后重新给出评分。"""
+    result = await llm.ainvoke([
+        SystemMessage(content=_SCORE_REVISE_SYSTEM),
+        HumanMessage(content=(
+            f"面试问题：{question}\n"
+            f"候选人回答：{answer[:600]}\n"
+            f"你的初步评分：{json.dumps(current, ensure_ascii=False)}\n"
+            f"审查员意见：{critique}"
+        )),
+    ])
+    return _parse_json(result.content, default=current)
+
+
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 async def score_node(state: InterviewState) -> dict:
     """
-    ── Node③：Scorer 评分 ──────────────────────────────────────────────
+    ── Node③：Scorer 评分（Critic-Actor Loop） ─────────────────────────
 
-    使用 create_react_agent：评分前可主动搜索知识库获取标准答案作为参考。
+    流程：
+      ① Scorer ReAct：搜索知识库 → 初步评分（RAG + CoT）
+      ② Critic ReAct：搜索知识库核实 → 审查评分，输出 {approved, critique}
+         - approved → 结束
+         - not approved → ③
+      ③ Scorer 看 critique 修正评分 → 回到 ②
+      （最多 _MAX_CRITIC_ROUNDS 轮）
     """
     roots, qnode, task_node = _get_score_context(state)
     if qnode is None:
@@ -62,21 +123,31 @@ async def score_node(state: InterviewState) -> dict:
 
     llm = _build_llm()
     tools = _make_score_tools(state)
-    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_SYSTEM))
 
+    # ① 初步评分
+    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_SYSTEM))
     result = await react_agent.ainvoke({
         "messages": [HumanMessage(content=_build_score_prompt(task_node, qnode))]
     })
-
-    score_data = _parse_json(
+    current = _parse_json(
         result["messages"][-1].content,
         default={"score": 3, "reasoning": "解析失败", "feedback": ""},
     )
-    score = max(1, min(5, int(score_data.get("score", 3))))
 
+    # ② Critic-Actor Loop
+    for round_i in range(_MAX_CRITIC_ROUNDS):
+        feedback = await _critic(llm, tools, qnode.text, qnode.answer, current)
+        approved = feedback.get("approved", True)
+        critique = feedback.get("critique", "")
+        print(f"[score/critic] round={round_i+1} approved={approved} critique='{critique[:60]}'")
+        if approved:
+            break
+        current = await _revise(llm, qnode.text, qnode.answer, current, critique)
+
+    score = max(1, min(5, int(current.get("score", 3))))
     qnode.score = score
-    qnode.reasoning = score_data.get("reasoning", "")
-    qnode.feedback = score_data.get("feedback", "")
+    qnode.reasoning = current.get("reasoning", "")
+    qnode.feedback = current.get("feedback", "")
     qnode.status = "scored"
 
     print(f"[score] q='{qnode.text[:40]}' score={score}")
