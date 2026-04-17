@@ -323,6 +323,105 @@ def get_subgraph_for_viz(query: str) -> dict:
         return {"nodes": [], "edges": []}
 
 
+def explore_concept_bfs(entity: str, hops: int = 1) -> dict:
+    """
+    联想工具：给定一个实体关键词，向量匹配到图中最近节点，
+    然后 BFS 展开邻居，返回邻居实体名称、类型、描述和边关系。
+
+    返回：
+      {
+        "matched": "GC",               # 图中实际匹配到的节点名
+        "neighbors": [
+          {
+            "name": "Stop-the-World",
+            "entity_type": "机制",
+            "description": "...",
+            "relation": "GC --导致--> Stop-the-World",
+            "direction": "out"         # out=GC指向它，in=它指向GC
+          }, ...
+        ],
+        "summary": "...",              # 供 LLM 直接使用的文字摘要
+      }
+    """
+    if not rag.is_available():
+        return {"matched": entity, "neighbors": [], "summary": "知识图谱不可用"}
+
+    try:
+        G = _get_nx_graph()
+
+        # ① 精确匹配优先
+        matched = entity if G.has_node(entity) else None
+
+        # ② 向量搜索最近实体
+        if matched is None:
+            ent_col = _get_entities_col()
+            if ent_col.count() > 0:
+                raw = rag._safe_query(ent_col, entity, top_k=3, return_distances=True)
+                for _, meta, dist in raw:
+                    name = meta.get("name", "")
+                    if name and G.has_node(name) and dist < 0.6:
+                        matched = name
+                        break
+
+        if matched is None:
+            return {"matched": entity, "neighbors": [], "summary": f"图谱中未找到与「{entity}」相关的节点"}
+
+        # ③ BFS 取邻居
+        neighbors: list[dict] = []
+        seen_names: set[str] = set()
+
+        for _ in range(hops):
+            frontier = [matched] if _ == 0 else []
+            for node in frontier if _ == 0 else seen_names:
+                # 出边：matched → nb
+                for nb in G.successors(node):
+                    if nb == matched or nb in seen_names:
+                        continue
+                    seen_names.add(nb)
+                    edge_data = G.edges[node, nb]
+                    attrs = G.nodes[nb]
+                    desc = attrs.get("description", "").split("；")[0].split(";")[0][:80]
+                    neighbors.append({
+                        "name":        nb,
+                        "entity_type": attrs.get("entity_type", "概念"),
+                        "description": desc,
+                        "relation":    f"{node} --{edge_data.get('predicate', '关联')}--> {nb}",
+                        "direction":   "out",
+                    })
+                # 入边：nb → matched
+                for nb in G.predecessors(node):
+                    if nb == matched or nb in seen_names:
+                        continue
+                    seen_names.add(nb)
+                    edge_data = G.edges[nb, node]
+                    attrs = G.nodes[nb]
+                    desc = attrs.get("description", "").split("；")[0].split(";")[0][:80]
+                    neighbors.append({
+                        "name":        nb,
+                        "entity_type": attrs.get("entity_type", "概念"),
+                        "description": desc,
+                        "relation":    f"{nb} --{edge_data.get('predicate', '关联')}--> {node}",
+                        "direction":   "in",
+                    })
+
+        # ④ 生成文字摘要
+        if not neighbors:
+            summary = f"「{matched}」在图谱中没有邻居节点"
+        else:
+            lines = [f"「{matched}」的关联概念（{len(neighbors)} 个）："]
+            for nb in neighbors[:8]:
+                lines.append(f"• {nb['name']}（{nb['entity_type']}）：{nb['description'] or '无描述'}  [{nb['relation']}]")
+            names = "、".join(nb["name"] for nb in neighbors[:8])
+            lines.append(f"\n可展开的概念：{names}")
+            summary = "\n".join(lines)
+
+        return {"matched": matched, "neighbors": neighbors[:8], "summary": summary}
+
+    except Exception as e:
+        print(f"[graph_rag] explore_concept_bfs 失败: {e}")
+        return {"matched": entity, "neighbors": [], "summary": f"图谱查询出错: {e}"}
+
+
 def graph_stats() -> dict:
     try:
         G       = _get_nx_graph()

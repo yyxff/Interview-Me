@@ -62,6 +62,25 @@ def _search_past_sessions_tool():
     return search_past_sessions
 
 
+def _explore_concept_tool():
+    @tool
+    async def explore_concept(entity: str) -> str:
+        """
+        联想工具：给定一个技术概念关键词，在知识图谱中做 BFS，
+        返回与该概念直接相关的邻居概念、关系描述。
+        适合发现关联知识点，决定下一步考察哪个方向。
+        示例：explore_concept("GC") → 返回 Stop-the-World、引用计数、G1 等关联概念。
+        """
+        try:
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from graph_rag.retrieval import explore_concept_bfs
+            result = explore_concept_bfs(entity)
+            return result["summary"]
+        except Exception as e:
+            return f"图谱查询失败: {e}"
+    return explore_concept
+
+
 # ── Node 工具组合 ─────────────────────────────────────────────────────────────
 
 def _make_plan_tools(state: InterviewState) -> list:
@@ -74,11 +93,12 @@ def _make_plan_tools(state: InterviewState) -> list:
 
 
 def _make_ask_tools(state: InterviewState) -> list:
-    """ask：知识库 + 简历 + 历史薄弱点，出有针对性的题。"""
+    """ask：知识库 + 简历 + 历史薄弱点 + 图谱联想，出有针对性的题。"""
     return [
         _search_knowledge_tool(),
         _search_profile_tool(state["profile_text"]),
         _search_past_sessions_tool(),
+        _explore_concept_tool(),
     ]
 
 
