@@ -4,6 +4,7 @@ score_node：Scorer 评分（Critic-Actor Loop）
 from __future__ import annotations
 
 import json
+import time
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -76,17 +77,21 @@ def _build_score_prompt(task_node: ThoughtNode | None, qnode: ThoughtNode) -> st
     )
 
 
-async def _critic(llm, tools, question: str, answer: str, current: dict) -> dict:
-    """Critic：审查当前评分，输出 {approved, critique}。可调工具核实技术细节。"""
-    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_CRITIC_SYSTEM))
-    result = await react_agent.ainvoke({
-        "messages": [HumanMessage(content=(
+async def _critic(llm, question: str, answer: str, current: dict) -> dict:
+    """Critic：审查当前评分逻辑是否自洽，输出 {approved, critique}。
+
+    不调工具——初步评分时 scorer 已经搜过知识库，
+    critic 只需检查 reasoning 逻辑是否矛盾，不需要重新检索。
+    """
+    result = await llm.ainvoke([
+        SystemMessage(content=_SCORE_CRITIC_SYSTEM),
+        HumanMessage(content=(
             f"面试问题：{question}\n"
             f"候选人回答：{answer[:600]}\n"
             f"当前评分：{json.dumps(current, ensure_ascii=False)}"
-        ))]
-    })
-    return _parse_json(result["messages"][-1].content, default={"approved": True, "critique": ""})
+        )),
+    ])
+    return _parse_json(result.content, default={"approved": True, "critique": ""})
 
 
 async def _revise(llm, question: str, answer: str, current: dict, critique: str) -> dict:
@@ -111,20 +116,25 @@ async def score_node(state: InterviewState) -> dict:
 
     流程：
       ① Scorer ReAct：搜索知识库 → 初步评分（RAG + CoT）
-      ② Critic ReAct：搜索知识库核实 → 审查评分，输出 {approved, critique}
+      ② Critic：审查评分，输出 {approved, critique}
          - approved → 结束
          - not approved → ③
       ③ Scorer 看 critique 修正评分 → 回到 ②
       （最多 _MAX_CRITIC_ROUNDS 轮）
     """
+    t0 = time.time()
     roots, qnode, task_node = _get_score_context(state)
     if qnode is None:
+        print("[score] ⚠ qnode is None, skip")
         return {"last_score": 3}
+
+    print(f"[score] ▶ start  q='{qnode.text[:50]}'  answer='{qnode.answer[:40]}'")
 
     llm = _build_llm()
     tools = _make_score_tools(state)
 
     # ① 初步评分
+    print(f"[score] ① calling scorer ReAct ...  ({time.time()-t0:.1f}s)")
     react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_SYSTEM))
     result = await react_agent.ainvoke({
         "messages": [HumanMessage(content=_build_score_prompt(task_node, qnode))]
@@ -133,16 +143,20 @@ async def score_node(state: InterviewState) -> dict:
         result["messages"][-1].content,
         default={"score": 3, "reasoning": "解析失败", "feedback": ""},
     )
+    print(f"[score] ① done  score={current.get('score')}  ({time.time()-t0:.1f}s)")
 
     # ② Critic-Actor Loop
     for round_i in range(_MAX_CRITIC_ROUNDS):
-        feedback = await _critic(llm, tools, qnode.text, qnode.answer, current)
+        print(f"[score] ② critic round={round_i+1} ...  ({time.time()-t0:.1f}s)")
+        feedback = await _critic(llm, qnode.text, qnode.answer, current)
         approved = feedback.get("approved", True)
         critique = feedback.get("critique", "")
-        print(f"[score/critic] round={round_i+1} approved={approved} critique='{critique[:60]}'")
+        print(f"[score] ② critic done  approved={approved}  critique='{critique[:80]}'  ({time.time()-t0:.1f}s)")
         if approved:
             break
+        print(f"[score] ③ revise ...  ({time.time()-t0:.1f}s)")
         current = await _revise(llm, qnode.text, qnode.answer, current, critique)
+        print(f"[score] ③ revise done  score={current.get('score')}  ({time.time()-t0:.1f}s)")
 
     score = max(1, min(5, int(current.get("score", 3))))
     qnode.score = score
@@ -150,7 +164,7 @@ async def score_node(state: InterviewState) -> dict:
     qnode.feedback = current.get("feedback", "")
     qnode.status = "scored"
 
-    print(f"[score] q='{qnode.text[:40]}' score={score}")
+    print(f"[score] ✔ done  score={score}  total={time.time()-t0:.1f}s")
 
     return {
         "roots_data": [_node_to_dict(r) for r in roots],

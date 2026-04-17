@@ -16,19 +16,18 @@ from ..state import InterviewState, _dict_to_node, _node_to_dict, _parse_json
 from ..tools import _make_ask_tools
 
 
-_INTERVIEWER_SYSTEM = """\
-你是一位专业技术面试官。
-
-当前考察任务：{task_text}
-出题场景：{question_context}
-{profile_section}
-规则：
-- 问题要有针对性，不重复已问过的问题
-- 语气自然专业，问题长度 1-2 句话
-- 如需了解具体知识点细节，可先搜索知识库
-
-输出 JSON（不加代码块）：
-{"intent": "考察意图描述", "question": "具体的面试问题"}"""
+_INTERVIEWER_SYSTEM_TEMPLATE = (
+    "你是一位专业技术面试官。\n\n"
+    "当前考察任务：{task_text}\n"
+    "出题场景：{question_context}\n"
+    "{profile_section}\n"
+    "规则：\n"
+    "- 问题要有针对性，不重复已问过的问题\n"
+    "- 语气自然专业，问题长度 1-2 句话\n"
+    '- 如需了解具体知识点细节，可先搜索知识库\n\n'
+    '输出 JSON（不加代码块）：\n'
+    '{"intent": "考察意图描述", "question": "具体的面试问题"}'
+)
 
 _REFLECT_SYSTEM = """\
 你是面试质量审核员。检查下面这道面试题是否合格：
@@ -67,10 +66,12 @@ def _build_system(task_node: ThoughtNode, is_first: bool,
         question_context = f"首问，话题开场（task_type={task_type}）"
     else:
         question_context = f"追问/转向（导演指示：{director_focus or '无'}）"
-    return _INTERVIEWER_SYSTEM.format(
-        task_text=task_node.text,
-        question_context=question_context,
-        profile_section=profile_section,
+    # 用字符串拼接而非 .format()，避免 task_node.text 中的花括号被误解析
+    return (
+        _INTERVIEWER_SYSTEM_TEMPLATE
+        .replace("{task_text}", task_node.text)
+        .replace("{question_context}", question_context)
+        .replace("{profile_section}", profile_section)
     )
 
 
@@ -120,6 +121,7 @@ async def ask_node(state: InterviewState) -> dict:
     └─────────────────────────────────────────────────────────────────┘
     """
     roots, task_node, cur_qnode, is_first, director_focus, profile_section = _get_ask_context(state)
+    print(f"[ask] ▶ start  task='{task_node.text[:40]}'  is_first={is_first}")
 
     llm = _build_llm()
     system = _build_system(task_node, is_first, director_focus, profile_section)
@@ -127,7 +129,9 @@ async def ask_node(state: InterviewState) -> dict:
 
     tools = _make_ask_tools(state)
     react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=system))
+    print(f"[ask] calling ReAct ...")
     result = await react_agent.ainvoke({"messages": [HumanMessage(content=user_msg)]})
+    print(f"[ask] ReAct done")
 
     parsed = _parse_json(result["messages"][-1].content, default={"intent": "", "question": ""})
     intent  = parsed.get("intent", "")
@@ -152,9 +156,11 @@ async def ask_node(state: InterviewState) -> dict:
     #   → 框架从 checkpointer 恢复 state
     #   → 从 interrupt() 这行继续执行
     #   → user_answer 就是 Command(resume=...) 里传入的值
+    print(f"[ask] ✔ question ready, calling interrupt()  q='{final_q[:60]}'")
     user_answer: str = interrupt(final_q)
     # ──────────────────────────────────────────────────────────────────────────
 
+    print(f"[ask] ▶ resumed from interrupt, answer='{user_answer[:40]}'")
     new_qnode.answer = user_answer
     new_qnode.status = "answered"
 

@@ -115,10 +115,12 @@ async def decide_node(state: InterviewState) -> dict:
     if qnode is None or task_node is None:
         return {"last_verdict": "pass", "last_sub_questions": [], "last_director_reasoning": "节点不存在"}
 
+    print(f"[decide] ▶ start  score={state['last_score']}  depth={qnode.depth}  q_count={question_count}")
     result = await _build_llm().ainvoke([
         SystemMessage(content=_DECIDE_SYSTEM),
         HumanMessage(content=_build_decide_prompt(state, qnode, task_node, question_count, pending_plan)),
     ])
+    print(f"[decide] ✔ done")
 
     d = _parse_json(result.content, default={"decision": "pass", "reasoning": "解析失败", "sub_questions": []})
     decision = d.get("decision", "pass")

@@ -388,57 +388,48 @@ export default function InterviewPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sid, message: text }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '', fullText = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const raw = line.slice(6).trim();
-          if (raw === '[DONE]') continue;
-          try {
-            const ev = JSON.parse(raw);
-            if (ev.text !== undefined) {
-              fullText += ev.text;
-              setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m));
-              setAgentStatus(s => ({ ...s, interviewer: { state: 'running', note: '回复中' } }));
-            }
-            if (ev.sm !== undefined) {
-              const newSm: SMSnapshot = ev.sm;
-              setSm(newSm);
-              if (ev.tree) setTree(ev.tree);
-              if (newSm.state === 'DONE') {
-                setAgentStatus({
-                  director:    { state: 'done', note: '面试结束' },
-                  scorer:      { state: 'done', note: '评分完成' },
-                  interviewer: { state: 'done', note: '面试结束' },
-                });
-                // 保存结果并获取文件名
-                saveSession();
-              } else if (newSm.state === 'ANSWERING' && newSm.last_score) {
-                const ls = newSm.last_score;
-                setAgentStatus(s => ({
-                  ...s,
-                  director:  { state: ls.verdict === 'pass' ? 'running' : 'idle', note: ls.verdict === 'pass' ? '推进下一任务' : '等待评分结果' },
-                  scorer:    { state: 'done', note: `${ls.score}/5 · ${ls.verdict} · ${ls.feedback.slice(0, 18)}` },
-                  interviewer: { state: 'idle', note: '等待回答' },
-                }));
-              }
-            }
-            if (ev.error) throw new Error(ev.error);
-          } catch (e: any) { if (e?.message) throw e; }
-        }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.detail || `HTTP ${res.status}`);
       }
-      if (fullText) ttsActionsRef.current.speak(fullText);
-      else setState('listening');
+
+      const data = await res.json();
+      const nextQuestion: string = data.response ?? '';
+      const done: boolean = data.done ?? false;
+
+      // 更新思维树
+      if (data.tree) setTree(data.tree);
+
+      if (done) {
+        // 面试结束
+        setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: nextQuestion } : m));
+        setSm(prev => prev ? { ...prev, state: 'DONE' } : null);
+        setAgentStatus({
+          director:    { state: 'done', note: '面试结束' },
+          scorer:      { state: 'done', note: '评分完成' },
+          interviewer: { state: 'done', note: '面试结束' },
+        });
+        saveSession();
+        if (nextQuestion) ttsActionsRef.current.speak(nextQuestion);
+        else setState('listening');
+      } else {
+        // 更新评分状态
+        const lastScore  = data.last_score  ?? null;
+        const lastVerdict = data.last_verdict ?? null;
+        setAgentStatus(s => ({
+          ...s,
+          scorer: lastScore !== null
+            ? { state: 'done', note: `${lastScore}/5 · ${lastVerdict ?? ''}` }
+            : { state: 'idle', note: '待机' },
+          director: { state: 'idle', note: lastVerdict === 'pass' ? '推进下一任务' : lastVerdict ?? '等待' },
+          interviewer: { state: 'idle', note: '等待回答' },
+        }));
+
+        // 显示下一道题
+        setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: nextQuestion } : m));
+        if (nextQuestion) ttsActionsRef.current.speak(nextQuestion);
+        else setState('listening');
+      }
     } catch (err: any) {
       setError(err.message ?? '请求失败');
       setState('listening');
