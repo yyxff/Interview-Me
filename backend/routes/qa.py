@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Literal
 
 from fastapi import APIRouter
@@ -13,6 +14,7 @@ import rag
 from llm.provider import LLMProvider
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _provider: LLMProvider | None = None
 
@@ -89,7 +91,7 @@ async def qa_stream(req: QARequest):
     retrieval_query = await rewrite_query(req.message, history_dicts)
 
     if retrieval_query != req.message:
-        print(f"[rewrite] '{req.message}' → '{retrieval_query}'")
+        logger.info("[rewrite] '%s' → '%s'", req.message, retrieval_query)
 
     # Graph RAG 检索
     graph_result    = rag.retrieve_graph(retrieval_query)
@@ -98,12 +100,12 @@ async def qa_stream(req: QARequest):
 
     graph_log = graph_result.get("graph_log", [])
     if graph_log:
-        print(f"[graph] {len(graph_log)} hits:")
+        logger.debug("[graph] %d hits:", len(graph_log))
         for entry in graph_log:
             if entry.get("type") == "entity":
-                print(f"  entity  {entry.get('name','')}  dist={entry.get('dist',-1):.4f}")
+                logger.debug("  entity  %s  dist=%.4f", entry.get('name',''), entry.get('dist',-1))
             else:
-                print(f"  relation  {entry.get('triple','')}  dist={entry.get('dist',-1):.4f}")
+                logger.debug("  relation  %s  dist=%.4f", entry.get('triple',''), entry.get('dist',-1))
 
     graph_extra: list[dict] = []
     graph_viz: dict = {}
@@ -125,7 +127,7 @@ async def qa_stream(req: QARequest):
                 f"{r.get('description', '')}"
             )
     if graph_summary:
-        print(f"[graph] summary → {graph_summary}")
+        logger.debug("[graph] summary → %s", graph_summary)
 
     result    = rag.retrieve_rich(retrieval_query, extra_chunks=graph_extra or None,
                                   path_map=path_map or None)
@@ -135,19 +137,21 @@ async def qa_stream(req: QARequest):
     retrieval_log = result.get("retrieval_log", [])
     summary = next((e for e in retrieval_log if e.get("_summary")), None)
     if summary:
-        print(
-            f"[retrieval] bi={summary['be_candidates']} + graph={summary['graph_extra']}"
-            f"(new={summary['graph_new']}, overlap={summary['graph_overlap']})"
-            f" → rerank_input={summary['rerank_input']} → final={summary['final_output']}"
+        logger.debug(
+            "[retrieval] bi=%s + graph=%s(new=%s, overlap=%s) → rerank_input=%s → final=%s",
+            summary['be_candidates'], summary['graph_extra'],
+            summary['graph_new'], summary['graph_overlap'],
+            summary['rerank_input'], summary['final_output'],
         )
     for entry in retrieval_log:
         if entry.get("_summary"):
             continue
         tag = " [graph-only]" if entry.get("graph_only") else (" [graph+vec]" if entry.get("via_graph") else "")
         q   = f"  Q:{entry['question']}" if entry.get("question") else ""
-        print(
-            f"  {entry.get('chunk_id','')}  bi={entry.get('bi_dist',-1):.4f}"
-            f"  rrf={entry.get('rrf_score',0):.5f}  rerank={entry.get('rerank_score',-1):.4f}{tag}{q}"
+        logger.debug(
+            "  %s  bi=%.4f  rrf=%.5f  rerank=%.4f%s%s",
+            entry.get('chunk_id',''), entry.get('bi_dist',-1),
+            entry.get('rrf_score',0), entry.get('rerank_score',-1), tag, q,
         )
 
     all_sources = knowledge + notes

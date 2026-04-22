@@ -3,11 +3,14 @@ ask_node：Interviewer 出题 + interrupt() 等待回答
 """
 from __future__ import annotations
 
+import logging
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import interrupt
+
+logger = logging.getLogger(__name__)
 
 from agents.models import ThoughtNode, find, flat
 
@@ -121,7 +124,7 @@ async def ask_node(state: InterviewState) -> dict:
     └─────────────────────────────────────────────────────────────────┘
     """
     roots, task_node, cur_qnode, is_first, director_focus, profile_section = _get_ask_context(state)
-    print(f"[ask] ▶ start  task='{task_node.text[:40]}'  is_first={is_first}")
+    logger.info("[ask] ▶ start  task='%s'  is_first=%s", task_node.text[:40], is_first)
 
     llm = _build_llm()
     system = _build_system(task_node, is_first, director_focus, profile_section)
@@ -129,9 +132,9 @@ async def ask_node(state: InterviewState) -> dict:
 
     tools = _make_ask_tools(state)
     react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=system))
-    print(f"[ask] calling ReAct ...")
+    logger.info("[ask] calling ReAct ...")
     result = await react_agent.ainvoke({"messages": [HumanMessage(content=user_msg)]})
-    print(f"[ask] ReAct done")
+    logger.info("[ask] ReAct done")
 
     parsed = _parse_json(result["messages"][-1].content, default={"intent": "", "question": ""})
     intent  = parsed.get("intent", "")
@@ -146,7 +149,7 @@ async def ask_node(state: InterviewState) -> dict:
     )
     task_node.children.append(new_qnode)
 
-    print(f"[ask] intent='{intent[:50]}' q='{final_q[:60]}'")
+    logger.info("[ask] intent='%s'  q='%s'", intent[:50], final_q[:60])
 
     # ③ interrupt() ────────────────────────────────────────────────────────────
     # 执行到这里：图暂停，final_q 作为"中断值"返回给 HTTP 调用者。
@@ -156,11 +159,11 @@ async def ask_node(state: InterviewState) -> dict:
     #   → 框架从 checkpointer 恢复 state
     #   → 从 interrupt() 这行继续执行
     #   → user_answer 就是 Command(resume=...) 里传入的值
-    print(f"[ask] ✔ question ready, calling interrupt()  q='{final_q[:60]}'")
+    logger.info("[ask] ✔ question ready, calling interrupt()  q='%s'", final_q[:60])
     user_answer: str = interrupt(final_q)
     # ──────────────────────────────────────────────────────────────────────────
 
-    print(f"[ask] ▶ resumed from interrupt, answer='{user_answer[:40]}'")
+    logger.info("[ask] ▶ resumed from interrupt, answer='%s'", user_answer[:40])
     new_qnode.answer = user_answer
     new_qnode.status = "answered"
 

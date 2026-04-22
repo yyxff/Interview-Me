@@ -3,9 +3,12 @@ decide_node：Director 决策 + route_after_decide 条件边路由函数
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
+
+logger = logging.getLogger(__name__)
 
 from agents.models import ThoughtNode, add_planned_nodes, find, flat, next_pending_task
 
@@ -115,12 +118,12 @@ async def decide_node(state: InterviewState) -> dict:
     if qnode is None or task_node is None:
         return {"last_verdict": "pass", "last_sub_questions": [], "last_director_reasoning": "节点不存在"}
 
-    print(f"[decide] ▶ start  score={state['last_score']}  depth={qnode.depth}  q_count={question_count}")
+    logger.info("[decide] ▶ start  score=%s  depth=%d  q_count=%d", state['last_score'], qnode.depth, question_count)
     result = await _build_llm().ainvoke([
         SystemMessage(content=_DECIDE_SYSTEM),
         HumanMessage(content=_build_decide_prompt(state, qnode, task_node, question_count, pending_plan)),
     ])
-    print(f"[decide] ✔ done")
+    logger.info("[decide] ✔ done")
 
     d = _parse_json(result.content, default={"decision": "pass", "reasoning": "解析失败", "sub_questions": []})
     decision = d.get("decision", "pass")
@@ -134,7 +137,7 @@ async def decide_node(state: InterviewState) -> dict:
 
     updated_task_id = _apply_decision(decision, sub_questions, qnode, task_node, roots, state["current_task_id"])
 
-    print(f"[decide] verdict={decision} score={state['last_score']} depth={qnode.depth}")
+    logger.info("[decide] verdict=%s  score=%s  depth=%d", decision, state['last_score'], qnode.depth)
 
     return {
         "roots_data": [_node_to_dict(r) for r in roots],

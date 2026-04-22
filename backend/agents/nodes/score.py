@@ -4,7 +4,10 @@ score_node：Scorer 评分（Critic-Actor Loop）
 from __future__ import annotations
 
 import json
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -125,16 +128,16 @@ async def score_node(state: InterviewState) -> dict:
     t0 = time.time()
     roots, qnode, task_node = _get_score_context(state)
     if qnode is None:
-        print("[score] ⚠ qnode is None, skip")
+        logger.warning("[score] ⚠ qnode is None, skip")
         return {"last_score": 3}
 
-    print(f"[score] ▶ start  q='{qnode.text[:50]}'  answer='{qnode.answer[:40]}'")
+    logger.info("[score] ▶ start  q='%s'  answer='%s'", qnode.text[:50], qnode.answer[:40])
 
     llm = _build_llm()
     tools = _make_score_tools(state)
 
     # ① 初步评分
-    print(f"[score] ① calling scorer ReAct ...  ({time.time()-t0:.1f}s)")
+    logger.info("[score] ① calling scorer ReAct ...  (%.1fs)", time.time()-t0)
     react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_SYSTEM))
     result = await react_agent.ainvoke({
         "messages": [HumanMessage(content=_build_score_prompt(task_node, qnode))]
@@ -143,33 +146,30 @@ async def score_node(state: InterviewState) -> dict:
         result["messages"][-1].content,
         default={"score": 3, "reasoning": "解析失败", "feedback": ""},
     )
-    print(
-        f"[score] ① done  ({time.time()-t0:.1f}s)\n"
-        f"  score    = {current.get('score')}\n"
-        f"  reasoning= {current.get('reasoning', '')[:200]}\n"
-        f"  feedback = {current.get('feedback', '')[:200]}"
+    logger.info(
+        "[score] ① done  (%.1fs)  score=%s\n  reasoning= %s\n  feedback = %s",
+        time.time()-t0, current.get('score'),
+        current.get('reasoning', '')[:200], current.get('feedback', '')[:200],
     )
 
     # ② Critic-Actor Loop
     for round_i in range(_MAX_CRITIC_ROUNDS):
-        print(f"[score] ② critic round={round_i+1} ...  ({time.time()-t0:.1f}s)")
+        logger.info("[score] ② critic round=%d ...  (%.1fs)", round_i+1, time.time()-t0)
         feedback = await _critic(llm, qnode.text, qnode.answer, current)
         approved = feedback.get("approved", True)
         critique = feedback.get("critique", "")
-        print(
-            f"[score] ② critic done  ({time.time()-t0:.1f}s)\n"
-            f"  approved = {approved}\n"
-            f"  critique = {critique}"
+        logger.info(
+            "[score] ② critic done  (%.1fs)  approved=%s\n  critique = %s",
+            time.time()-t0, approved, critique,
         )
         if approved:
             break
-        print(f"[score] ③ revise ...  ({time.time()-t0:.1f}s)")
+        logger.info("[score] ③ revise ...  (%.1fs)", time.time()-t0)
         current = await _revise(llm, tools, qnode.text, qnode.answer, current, critique)
-        print(
-            f"[score] ③ revise done  ({time.time()-t0:.1f}s)\n"
-            f"  score    = {current.get('score')}\n"
-            f"  reasoning= {current.get('reasoning', '')[:200]}\n"
-            f"  feedback = {current.get('feedback', '')[:200]}"
+        logger.info(
+            "[score] ③ revise done  (%.1fs)  score=%s\n  reasoning= %s\n  feedback = %s",
+            time.time()-t0, current.get('score'),
+            current.get('reasoning', '')[:200], current.get('feedback', '')[:200],
         )
 
     score = max(1, min(5, int(current.get("score", 3))))
@@ -178,7 +178,7 @@ async def score_node(state: InterviewState) -> dict:
     qnode.feedback = current.get("feedback", "")
     qnode.status = "scored"
 
-    print(f"[score] ✔ done  score={score}  total={time.time()-t0:.1f}s")
+    logger.info("[score] ✔ done  score=%d  total=%.1fs", score, time.time()-t0)
 
     return {
         "roots_data": [_node_to_dict(r) for r in roots],

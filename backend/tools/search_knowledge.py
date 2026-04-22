@@ -19,7 +19,7 @@ def search_knowledge(query: str) -> str:
     """向量 + 图谱混合检索，返回最相关的知识库片段。"""
     import rag as _rag
     import graph_rag as _gr
-    logger.debug("search_knowledge query=%r", query)
+    logger.info("search_knowledge query=%r", query)
     gr = _rag.retrieve_graph(query)
     extra = _gr.get_chunks_by_ids(gr.get("source_chunk_ids", []))
     path_map = {
@@ -48,9 +48,9 @@ def search_knowledge(query: str) -> str:
                 entry.get("bi_dist"), entry.get("rerank_score"),
             )
     if not chunks:
-        logger.debug("search_knowledge → 知识库无相关内容")
+        logger.info("search_knowledge → 知识库无相关内容")
         return "知识库无相关内容"
-    logger.debug("search_knowledge → %d chunks returned", len(chunks))
+    logger.info("search_knowledge → %d chunks returned", len(chunks))
     return "\n---\n".join(
         f"[{c['source']} §{c.get('chapter', '')}] {c['text'][:300]}" for c in chunks
     )

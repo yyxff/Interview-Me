@@ -3,6 +3,7 @@ plan_node：Director 规划任务
 """
 from __future__ import annotations
 
+import logging
 import uuid
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -13,6 +14,8 @@ from agents.models import ThoughtNode, add_planned_nodes
 from ..llm import _build_llm
 from ..state import InterviewState, _node_to_dict, _parse_json
 from ..tools import _make_plan_tools
+
+logger = logging.getLogger(__name__)
 
 
 _PLAN_SYSTEM = """\
@@ -87,7 +90,7 @@ async def plan_node(state: InterviewState) -> dict:
     roots = _parse_tasks(raw)
     roots[0].status = "active"
 
-    print(f"[plan] tasks={len(roots)} planned={[len(r.children) for r in roots]}")
+    logger.info("[plan] tasks=%d planned=%s", len(roots), [len(r.children) for r in roots])
 
     return {
         "roots_data": [_node_to_dict(r) for r in roots],

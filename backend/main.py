@@ -26,6 +26,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
+# 压制第三方库的 DEBUG 噪音
+for _noisy in ("httpcore", "httpx", "huggingface_hub", "filelock", "urllib3"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 from fastapi.middleware.cors import CORSMiddleware
 
 import rag
