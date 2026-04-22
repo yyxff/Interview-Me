@@ -1,10 +1,13 @@
-"""Tool: search_profile — 在候选人简历中搜索相关经验"""
+"""Tool: search_profile — 查看候选人简历"""
 from __future__ import annotations
+
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from interview_agent import InterviewSession
 
+logger = logging.getLogger(__name__)
 
 DESC = (
     "search_profile: 在候选人简历中搜索相关技术经验\n"
@@ -12,14 +15,14 @@ DESC = (
 )
 
 
+def search_profile(profile: str, query: str) -> str:
+    """返回候选人完整简历。"""
+    logger.debug("search_profile query=%r (%d chars)", query, len(profile))
+    return profile
+
+
+# ── 老式接口（供旧版 interview_agent 使用） ───────────────────────────────────
 def make(session: "InterviewSession") -> dict:
     async def fn(query: str) -> str:
-        text = session.profile_text or ""
-        if not text:
-            return "未上传候选人简历"
-        keywords = query.split()
-        lines = [l for l in text.split("\n") if any(kw in l for kw in keywords)]
-        snippet = "\n".join(lines[:20]) if lines else text[:600]
-        return snippet[:600]
-
+        return search_profile(session.profile_text or "", query)
     return {"desc": DESC, "fn": fn}

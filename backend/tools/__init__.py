@@ -17,12 +17,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from interview_agent import InterviewSession
 
-from tools import search_knowledge, search_profile, search_past_sessions
+from tools import search_knowledge, search_profile, search_past_sessions, explore_concept
 
 REGISTRY: dict[str, object] = {
-    "search_knowledge":    search_knowledge,
-    "search_profile":      search_profile,
+    "search_knowledge":     search_knowledge,
+    "search_profile":       search_profile,
     "search_past_sessions": search_past_sessions,
+    "explore_concept":      explore_concept,
 }
 
 

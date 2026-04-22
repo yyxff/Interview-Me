@@ -20,6 +20,12 @@ import asyncio
 import logging
 
 from fastapi import FastAPI
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
 from fastapi.middleware.cors import CORSMiddleware
 
 import rag
