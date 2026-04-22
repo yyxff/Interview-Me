@@ -33,20 +33,21 @@ def search_knowledge(query: str) -> str:
     chunks = result.get("knowledge", [])
     log = result.get("retrieval_log", [])
     summary = next((e for e in reversed(log) if e.get("_summary")), None)
+    chunk_entries = [e for e in log if e.get("chunk_id")]
+    lines = [f"search_knowledge query={query!r}"]
     if summary:
-        logger.debug(
-            "search_knowledge summary: be_candidates=%s graph_extra=%s "
-            "rerank_input=%s final_output=%s",
-            summary.get("be_candidates"), summary.get("graph_extra"),
-            summary.get("rerank_input"), summary.get("final_output"),
+        lines.append(
+            f"  pipeline: be={summary.get('be_candidates')} graph={summary.get('graph_extra')}"
+            f" rrf={summary.get('rerank_input')} final={summary.get('final_output')}"
         )
-    for entry in log:
-        if not entry.get("_summary"):
-            logger.debug(
-                "search_knowledge   chunk=%s source=%s bi_dist=%s rerank=%s",
-                entry.get("chunk_id", "?")[:40], entry.get("source", "?"),
-                entry.get("bi_dist"), entry.get("rerank_score"),
-            )
+    for e in chunk_entries:
+        via = (" [graph]" if e.get("via_graph") and not e.get("bi_dist") else
+               " [vec][graph]" if e.get("via_graph") else " [vec]")
+        lines.append(
+            f"  {e.get('chunk_id','?')[:40]}{via}"
+            f"  bi={e.get('bi_dist')}  rerank={e.get('rerank_score')}"
+        )
+    logger.info("\n".join(lines))
     if not chunks:
         logger.info("search_knowledge → 知识库无相关内容")
         return "知识库无相关内容"

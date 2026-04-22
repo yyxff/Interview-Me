@@ -152,7 +152,10 @@ def retrieve_rich(
             ranked = rerank(query, rerank_inputs)
 
             be_cid_set = set(be_rank)
+            RERANK_SCORE_THRESHOLD = 0.5
             for doc, meta, score in ranked[:rk]:
+                if score < RERANK_SCORE_THRESHOLD:
+                    break
                 cid        = meta.get("chunk_id", "")
                 graph_only = cid in extra_map and cid not in be_cid_set
                 knowledge.append({
