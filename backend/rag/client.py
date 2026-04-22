@@ -15,10 +15,13 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from collections import Counter
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ── 路径常量 ───────────────────────────────────────────────────────────────────
 
@@ -75,13 +78,14 @@ def _get_ef():
     global _embed_fn
     if _embed_fn is None:
         from sentence_transformers import SentenceTransformer
-        print("[rag] 加载 Embedding 模型 BAAI/bge-small-zh-v1.5 ...")
+        logger.info("[rag] 加载 Embedding 模型 BAAI/bge-small-zh-v1.5 ...")
         _model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
-        print("[rag] Embedding 模型加载完成")
+        logger.info("[rag] Embedding 模型加载完成")
 
         class _EF:
             def __call__(self, texts: list[str]) -> list[list[float]]:
-                return _model.encode(texts, normalize_embeddings=True).tolist()
+                return _model.encode(texts, normalize_embeddings=True,
+                                     show_progress_bar=False).tolist()
 
         _embed_fn = _EF()
     return _embed_fn
@@ -378,9 +382,9 @@ def _get_reranker():
     global _reranker
     if _reranker is None:
         from sentence_transformers import CrossEncoder
-        print("[rag] 加载 Reranker 模型 BAAI/bge-reranker-base ...")
+        logger.info("[rag] 加载 Reranker 模型 BAAI/bge-reranker-base ...")
         _reranker = CrossEncoder("BAAI/bge-reranker-base")
-        print("[rag] Reranker 加载完成")
+        logger.info("[rag] Reranker 加载完成")
     return _reranker
 
 
@@ -395,5 +399,5 @@ def rerank(query: str, chunks: list[tuple[str, dict]]) -> list[tuple[str, dict, 
         ranked   = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
         return [(doc, meta, score) for (doc, meta), score in ranked]
     except Exception as e:
-        print(f"[rag] Reranker 失败，退化为原顺序: {e}")
+        logger.warning("[rag] Reranker 失败，退化为原顺序: %s", e)
         return [(doc, meta, 0.0) for doc, meta in chunks]

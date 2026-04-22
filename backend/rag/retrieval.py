@@ -121,6 +121,11 @@ def retrieve_rich(
             gph_only = sum(1 for cid in graph_rank if cid not in set(be_rank))
             overlap  = sum(1 for cid in graph_rank if cid in set(be_rank))
 
+            retrieval_log.append({
+                "_be_stage": True,
+                "candidates": [(cid, round(dist_map.get(cid, -1), 4)) for cid in be_rank],
+            })
+
             if graph_rank:
                 rrf_scores: dict[str, float] = {}
                 for ranked_list in [be_rank, graph_rank]:
@@ -134,6 +139,11 @@ def retrieve_rich(
 
             RERANK_LIMIT  = max(k * 4, 15)
             rerank_cids   = [cid for cid in merged_ids if cid in cand_map][:RERANK_LIMIT]
+
+            retrieval_log.append({
+                "_rrf_stage": True,
+                "candidates": [(cid, round(rrf_scores.get(cid, 0), 6)) for cid in rerank_cids],
+            })
             rerank_inputs = []
             for cid in rerank_cids:
                 raw_text, meta = cand_map[cid]
@@ -152,7 +162,7 @@ def retrieve_rich(
                     "chapter":   meta.get("chapter", meta.get("path", "")),
                     "chunk_id":  cid,
                     "question":  meta.get("question", ""),
-                    "via_graph": graph_only,
+                    "via_graph": cid in extra_map,
                 })
                 retrieval_log.append({
                     "chunk_id":     cid,

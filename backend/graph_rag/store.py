@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import rag  # 复用 _get_client, _get_ef, is_available, KNOWLEDGE_DIR
+
+logger = logging.getLogger(__name__)
 
 # ── 路径常量 ──────────────────────────────────────────────────────────────────
 
@@ -85,8 +88,8 @@ def _load_all_graphs_into_nx():
                 G.add_edge(subj, obj, **{k: v for k, v in edge.items()
                                           if k not in ("subject", "object")})
         except Exception as e:
-            print(f"[graph_rag] 加载图失败 {gf.name}: {e}")
-    print(f"[graph_rag] 图加载完成: {G.number_of_nodes()} 节点, {G.number_of_edges()} 边")
+            logger.warning("[graph_rag] 加载图失败 %s: %s", gf.name, e)
+    logger.info("[graph_rag] 图加载完成: %d 节点, %d 边", G.number_of_nodes(), G.number_of_edges())
     return G
 
 

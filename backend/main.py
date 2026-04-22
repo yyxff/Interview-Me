@@ -21,14 +21,21 @@ import logging
 
 from fastapi import FastAPI
 
+import os
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")   # 关闭 LOAD REPORT / Loading weights
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")   # 关闭 tokenizers 并行警告
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-# 压制第三方库的 DEBUG 噪音
-for _noisy in ("httpcore", "httpx", "huggingface_hub", "filelock", "urllib3"):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
+# 压制第三方库噪音
+for _noisy in (
+    "httpcore", "httpx", "huggingface_hub", "filelock", "urllib3",
+    "transformers", "sentence_transformers", "torch",
+):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
 from fastapi.middleware.cors import CORSMiddleware
 
 import rag
