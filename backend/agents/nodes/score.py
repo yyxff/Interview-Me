@@ -94,18 +94,18 @@ async def _critic(llm, question: str, answer: str, current: dict) -> dict:
     return _parse_json(result.content, default={"approved": True, "critique": ""})
 
 
-async def _revise(llm, question: str, answer: str, current: dict, critique: str) -> dict:
-    """Actor 修正：评分员看到 critique 后重新给出评分。"""
-    result = await llm.ainvoke([
-        SystemMessage(content=_SCORE_REVISE_SYSTEM),
-        HumanMessage(content=(
+async def _revise(llm, tools: list, question: str, answer: str, current: dict, critique: str) -> dict:
+    """Actor 修正：ReAct agent 看到 critique 后，可再次搜知识库，然后给出修正评分。"""
+    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_REVISE_SYSTEM))
+    result = await react_agent.ainvoke({
+        "messages": [HumanMessage(content=(
             f"面试问题：{question}\n"
             f"候选人回答：{answer[:600]}\n"
             f"你的初步评分：{json.dumps(current, ensure_ascii=False)}\n"
             f"审查员意见：{critique}"
-        )),
-    ])
-    return _parse_json(result.content, default=current)
+        ))]
+    })
+    return _parse_json(result["messages"][-1].content, default=current)
 
 
 # ── Node ──────────────────────────────────────────────────────────────────────
@@ -143,7 +143,12 @@ async def score_node(state: InterviewState) -> dict:
         result["messages"][-1].content,
         default={"score": 3, "reasoning": "解析失败", "feedback": ""},
     )
-    print(f"[score] ① done  score={current.get('score')}  ({time.time()-t0:.1f}s)")
+    print(
+        f"[score] ① done  ({time.time()-t0:.1f}s)\n"
+        f"  score    = {current.get('score')}\n"
+        f"  reasoning= {current.get('reasoning', '')[:200]}\n"
+        f"  feedback = {current.get('feedback', '')[:200]}"
+    )
 
     # ② Critic-Actor Loop
     for round_i in range(_MAX_CRITIC_ROUNDS):
@@ -151,12 +156,21 @@ async def score_node(state: InterviewState) -> dict:
         feedback = await _critic(llm, qnode.text, qnode.answer, current)
         approved = feedback.get("approved", True)
         critique = feedback.get("critique", "")
-        print(f"[score] ② critic done  approved={approved}  critique='{critique[:80]}'  ({time.time()-t0:.1f}s)")
+        print(
+            f"[score] ② critic done  ({time.time()-t0:.1f}s)\n"
+            f"  approved = {approved}\n"
+            f"  critique = {critique}"
+        )
         if approved:
             break
         print(f"[score] ③ revise ...  ({time.time()-t0:.1f}s)")
-        current = await _revise(llm, qnode.text, qnode.answer, current, critique)
-        print(f"[score] ③ revise done  score={current.get('score')}  ({time.time()-t0:.1f}s)")
+        current = await _revise(llm, tools, qnode.text, qnode.answer, current, critique)
+        print(
+            f"[score] ③ revise done  ({time.time()-t0:.1f}s)\n"
+            f"  score    = {current.get('score')}\n"
+            f"  reasoning= {current.get('reasoning', '')[:200]}\n"
+            f"  feedback = {current.get('feedback', '')[:200]}"
+        )
 
     score = max(1, min(5, int(current.get("score", 3))))
     qnode.score = score

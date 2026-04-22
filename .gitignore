@@ -20,6 +20,7 @@ backend/qa_sessions/
 backend/graph/
 # 评测日志和测试集（本地产物，数据量大）
 backend/eval_logs/
+backend/sessions/
 experiments/rag/logs/
 experiments/rag/testsets/
 # 用户 profile（简历等，本地数据）

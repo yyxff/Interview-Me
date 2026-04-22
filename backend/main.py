@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,6 +38,13 @@ import routes.qa as _qa
 import routes.knowledge as _knowledge
 import routes.graph as _graph
 import routes.notes as _notes
+
+# ── 屏蔽轮询日志（/rag/index-progress、/graph/index-progress） ────────────────
+class _SuppressPollingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "index-progress" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(_SuppressPollingFilter())
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 
