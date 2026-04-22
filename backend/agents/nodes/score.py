@@ -31,16 +31,23 @@ _SCORE_SYSTEM = """\
 2分：只了解表面概念，细节错误或不知道原理
 1分：答非所问，或完全不了解
 
+评分前请在 reasoning 中按以下步骤逐步分析：
+1. 候选人实际说了哪些要点（只基于原文，不要推断）
+2. 对照标准答案，哪些要点覆盖了，哪些遗漏了
+3. 有无明显错误或误解
+4. 综合以上，得出分数
+
 输出 JSON（不加代码块）：
-{"score": 3, "reasoning": "候选人提到了...", "feedback": "掌握了...，但缺少..."}"""
+{"score": 3, "reasoning": "1)候选人提到了... 2)遗漏了... 3)无明显错误 4)综合得分3", "feedback": "掌握了...，但缺少..."}"""
 
 _SCORE_CRITIC_SYSTEM = """\
-你是评分审查员。如有必要，可先搜索知识库核实技术细节的准确性。
+你是评分审查员。遇到不确定的技术细节，先搜索知识库核实，再下判断。
 
 检查下面这个评分是否准确公平：
 1. reasoning 有没有幻觉（捏造候选人没说过的内容）？
-2. score 与 reasoning 是否自洽？（如"方向正确但有遗漏"打了1分，属于矛盾）
-3. feedback 是否具体有建设性，而不是泛泛而谈？
+2. reasoning 中引用的技术细节是否准确？如不确定，搜索知识库验证
+3. score 与 reasoning 是否自洽？（如"方向正确但有遗漏"打了1分，属于矛盾）
+4. feedback 是否具体有建设性，而不是泛泛而谈？
 
 输出 JSON（不加代码块）：
 {"approved": true, "critique": "（如不通过，说明具体问题；通过则留空）"}"""
@@ -51,12 +58,18 @@ _SCORE_REVISE_SYSTEM = """\
 评分标准（1-5分）：
 5分：准确完整，有深度，能说明原理并举例
 4分：覆盖核心要点，表述清晰，基本无遗漏
-3分：方向正确但有明显遗漏，或表述模糊
+3方向正确但有明显遗漏，或表述模糊
 2分：只了解表面概念，细节错误或不知道原理
 1分：答非所问，或完全不了解
 
+针对审查员的意见，在 reasoning 中重新逐步分析：
+1. 候选人实际说了哪些要点（只基于原文，不要推断）
+2. 对照标准答案，哪些要点覆盖了，哪些遗漏了
+3. 有无明显错误或误解
+4. 综合以上，得出修正后的分数
+
 输出 JSON（不加代码块）：
-{"score": 3, "reasoning": "...", "feedback": "..."}"""
+{"score": 3, "reasoning": "1)候选人提到了... 2)遗漏了... 3)无明显错误 4)综合得分3", "feedback": "..."}"""
 
 _MAX_CRITIC_ROUNDS = 2
 
@@ -80,21 +93,17 @@ def _build_score_prompt(task_node: ThoughtNode | None, qnode: ThoughtNode) -> st
     )
 
 
-async def _critic(llm, question: str, answer: str, current: dict) -> dict:
-    """Critic：审查当前评分逻辑是否自洽，输出 {approved, critique}。
-
-    不调工具——初步评分时 scorer 已经搜过知识库，
-    critic 只需检查 reasoning 逻辑是否矛盾，不需要重新检索。
-    """
-    result = await llm.ainvoke([
-        SystemMessage(content=_SCORE_CRITIC_SYSTEM),
-        HumanMessage(content=(
+async def _critic(llm, tools: list, question: str, answer: str, current: dict) -> dict:
+    """Critic：审查评分逻辑是否自洽、技术细节是否准确，输出 {approved, critique}。"""
+    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_SCORE_CRITIC_SYSTEM))
+    result = await react_agent.ainvoke({
+        "messages": [HumanMessage(content=(
             f"面试问题：{question}\n"
             f"候选人回答：{answer[:600]}\n"
             f"当前评分：{json.dumps(current, ensure_ascii=False)}"
-        )),
-    ])
-    return _parse_json(result.content, default={"approved": True, "critique": ""})
+        ))]
+    })
+    return _parse_json(result["messages"][-1].content, default={"approved": True, "critique": ""})
 
 
 async def _revise(llm, tools: list, question: str, answer: str, current: dict, critique: str) -> dict:
@@ -155,7 +164,7 @@ async def score_node(state: InterviewState) -> dict:
     # ② Critic-Actor Loop
     for round_i in range(_MAX_CRITIC_ROUNDS):
         logger.info("[score] ② critic round=%d ...  (%.1fs)", round_i+1, time.time()-t0)
-        feedback = await _critic(llm, qnode.text, qnode.answer, current)
+        feedback = await _critic(llm, tools, qnode.text, qnode.answer, current)
         approved = feedback.get("approved", True)
         critique = feedback.get("critique", "")
         logger.info(
