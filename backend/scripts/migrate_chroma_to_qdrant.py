@@ -11,7 +11,7 @@
 
 用法：
   cd backend/
-  python migrate_chroma_to_qdrant.py
+  python scripts/migrate_chroma_to_qdrant.py
 
 前提：
   - conda activate interview-me
@@ -26,8 +26,8 @@ from collections import Counter
 from pathlib import Path
 
 # ── 路径 ────────────────────────────────────────────────────────────────────
-CHROMA_PATH = Path(__file__).parent / "chroma_db"
-QDRANT_PATH = Path(__file__).parent / "qdrant_db"
+CHROMA_PATH = Path(__file__).parent.parent / "chroma_db"
+QDRANT_PATH = Path(__file__).parent.parent / "qdrant_db"
 
 # client.py 中使用的同一个 namespace
 _NS = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")

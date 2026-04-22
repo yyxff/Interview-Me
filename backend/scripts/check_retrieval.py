@@ -3,19 +3,20 @@
 检索召回测试工具
 
 用法:
-    python check_retrieval.py "进程间通信"           # 全库（知识库+笔记），有重排
-    python check_retrieval.py --knowledge "..."      # 仅知识库
-    python check_retrieval.py --notes "..."          # 仅笔记库
-    python check_retrieval.py --norerank "..."       # 跳过 cross-encoder 重排
-    python check_retrieval.py --top 8 "..."          # 指定返回条数
-    python check_retrieval.py                        # 交互模式（全库+重排）
+    python scripts/check_retrieval.py "进程间通信"           # 全库（知识库+笔记），有重排
+    python scripts/check_retrieval.py --knowledge "..."      # 仅知识库
+    python scripts/check_retrieval.py --notes "..."          # 仅笔记库
+    python scripts/check_retrieval.py --norerank "..."       # 跳过 cross-encoder 重排
+    python scripts/check_retrieval.py --top 8 "..."          # 指定返回条数
+    python scripts/check_retrieval.py                        # 交互模式（全库+重排）
 """
 
 import sys
 import argparse
 from typing import Literal
 
-sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 import rag
 
 # ── 原始向量查询（不带阈值过滤） ────────────────────────────────────────────

@@ -108,8 +108,8 @@ def main():
     args = parser.parse_args()
 
     # 导入时已在 backend/ 下，确保路径正确
-    import os
-    sys.path.insert(0, os.path.dirname(__file__))
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
 
     if args.query:
         run_query(args.query, args.top_entity, args.top_rel)

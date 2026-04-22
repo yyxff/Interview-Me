@@ -7,13 +7,13 @@
 
 用法：
     cd backend
-    python backfill_qa.py
+    python scripts/backfill_qa.py
 """
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 import rag
 
 def main() -> None:
