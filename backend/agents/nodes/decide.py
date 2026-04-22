@@ -7,6 +7,7 @@ import logging
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.prebuilt import create_react_agent
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +15,13 @@ from agents.models import ThoughtNode, add_planned_nodes, find, flat, next_pendi
 
 from ..llm import _build_llm
 from ..state import InterviewState, _dict_to_node, _node_to_dict, _parse_json
+from ..tools import _make_decide_tools
 
 
 _DECIDE_SYSTEM = """\
-你是面试导演。根据评分结果决定下一步策略。
+你是面试导演。根据当前评分和全局进度决定下一步策略，必要时动态调整任务列表。
 
+── 当前任务决策（必须输出）────────────────────────────────────────
 决策选项（四选一）：
 - "deepen"  : 候选人理解不够，从多个角度继续考察当前知识点（下钻）
 - "pivot"   : 当前答题尚可，但任务还有其他重要角度未覆盖（同级）
@@ -31,14 +34,35 @@ _DECIDE_SYSTEM = """\
 - 深度≥3：优先 back_up 或 pass
 - 本任务已问题数≥4：强制 pass
 
+── 全局任务调整（可选，调用工具）────────────────────────────────
+结合候选人表现和全局进度，判断是否需要：
+- add_task   : 候选人简历/回答中暴露出值得深挖的新方向，且现有任务未覆盖
+- remove_task: 某个 pending 任务与候选人能力明显不匹配，或时间不足
+
+调用工具后，再输出下面的 JSON。
+
 输出 JSON（不加代码块）：
 {"decision": "deepen", "reasoning": "理由", "sub_questions": ["子问题方向1","子问题方向2"]}"""
 
 
 # ── 上下文函数 ────────────────────────────────────────────────────────────────
 
+def _build_tree_summary(roots: list[ThoughtNode], current_task_id: str | None) -> str:
+    """把整棵任务树压缩成一段导演视角的摘要。"""
+    lines = [f"任务概览（共 {len(roots)} 个）："]
+    for node in roots:
+        questions = [n for n in flat([node]) if n.node_type == "question"
+                     and n.status not in ("planned", "skipped")]
+        scores = [n.score for n in questions if n.score is not None]
+        avg = f"均分{sum(scores)/len(scores):.1f}" if scores else "未评分"
+        q_count = f"{len(questions)}题"
+        marker = "▶ " if node.id == current_task_id else "  "
+        status_tag = {"done": "✓", "active": "▶", "pending": "○"}.get(node.status, "?")
+        lines.append(f"  {marker}[{status_tag}] {node.text}  {q_count} {avg}")
+    return "\n".join(lines)
+
+
 def _get_decide_context(state: InterviewState) -> tuple[list, ThoughtNode | None, ThoughtNode | None, int, str]:
-    """从 state 还原树，收集决策所需的上下文信息。"""
     roots = [_dict_to_node(d) for d in state["roots_data"]]
     qnode = find(roots, state["current_question_id"])
     task_node = find(roots, state["current_task_id"])
@@ -59,10 +83,13 @@ def _get_decide_context(state: InterviewState) -> tuple[list, ThoughtNode | None
     return roots, qnode, task_node, question_count, pending_plan
 
 
-def _build_decide_prompt(state: InterviewState, qnode: ThoughtNode, task_node: ThoughtNode,
-                          question_count: int, pending_plan: str) -> str:
+def _build_decide_prompt(state: InterviewState, roots: list[ThoughtNode],
+                         qnode: ThoughtNode, task_node: ThoughtNode,
+                         question_count: int, pending_plan: str) -> str:
+    tree_summary = _build_tree_summary(roots, state.get("current_task_id"))
     return (
-        f"当前考察任务：{task_node.text}\n"
+        f"{tree_summary}\n\n"
+        f"当前考察任务：{task_node.text}（task_id={task_node.id}）\n"
         f"面试官的问题：{qnode.text}\n"
         f"候选人的回答：{qnode.answer[:400]}\n"
         f"评分：{state['last_score']}/5\n"
@@ -83,7 +110,7 @@ def _apply_decision(decision: str, sub_questions: list[str],
         if next_task:
             next_task.status = "active"
             return next_task.id
-        return None  # 面试结束
+        return None
 
     if decision in ("deepen", "pivot", "back_up"):
         if decision == "deepen":
@@ -102,30 +129,26 @@ def _apply_decision(decision: str, sub_questions: list[str],
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 async def decide_node(state: InterviewState) -> dict:
-    """
-    ── Node④：Director 决策 ────────────────────────────────────────────
-
-    演示要点：节点不做路由，只更新 state；路由由条件边的函数决定
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  节点职责：把 verdict 写入 state["last_verdict"]                │
-    │  路由职责：route_after_decide(state) 读 last_verdict 返回 key   │
-    │                                                                 │
-    │  好处：节点纯粹负责业务逻辑，路由逻辑集中在一处，清晰可维护      │
-    └─────────────────────────────────────────────────────────────────┘
-    """
     roots, qnode, task_node, question_count, pending_plan = _get_decide_context(state)
 
     if qnode is None or task_node is None:
         return {"last_verdict": "pass", "last_sub_questions": [], "last_director_reasoning": "节点不存在"}
 
-    logger.info("[decide] ▶ start  score=%s  depth=%d  q_count=%d", state['last_score'], qnode.depth, question_count)
-    result = await _build_llm().ainvoke([
-        SystemMessage(content=_DECIDE_SYSTEM),
-        HumanMessage(content=_build_decide_prompt(state, qnode, task_node, question_count, pending_plan)),
-    ])
-    logger.info("[decide] ✔ done")
+    logger.info("[decide] ▶ start  score=%s  depth=%d  q_count=%d  tasks=%d",
+                state['last_score'], qnode.depth, question_count, len(roots))
 
-    d = _parse_json(result.content, default={"decision": "pass", "reasoning": "解析失败", "sub_questions": []})
+    llm   = _build_llm()
+    tools = _make_decide_tools(roots)   # 闭包捕获 roots，工具直接原地修改树
+    react_agent = create_react_agent(llm, tools, prompt=SystemMessage(content=_DECIDE_SYSTEM))
+
+    result = await react_agent.ainvoke({
+        "messages": [HumanMessage(content=_build_decide_prompt(
+            state, roots, qnode, task_node, question_count, pending_plan
+        ))]
+    })
+
+    d = _parse_json(result["messages"][-1].content,
+                    default={"decision": "pass", "reasoning": "解析失败", "sub_questions": []})
     decision = d.get("decision", "pass")
     if decision not in ("deepen", "pivot", "back_up", "pass"):
         decision = "pass"
@@ -135,9 +158,10 @@ async def decide_node(state: InterviewState) -> dict:
     qnode.director_note = d.get("reasoning", "")
     qnode.status = "done"
 
+    # roots 可能已被工具（add_task/remove_task）原地修改，直接在此基础上应用决策
     updated_task_id = _apply_decision(decision, sub_questions, qnode, task_node, roots, state["current_task_id"])
 
-    logger.info("[decide] verdict=%s  score=%s  depth=%d", decision, state['last_score'], qnode.depth)
+    logger.info("[decide] verdict=%s  score=%s  tasks_now=%d", decision, state['last_score'], len(roots))
 
     return {
         "roots_data": [_node_to_dict(r) for r in roots],
@@ -151,18 +175,6 @@ async def decide_node(state: InterviewState) -> dict:
 # ── 条件边路由函数 ────────────────────────────────────────────────────────────
 
 def route_after_decide(state: InterviewState) -> Literal["ask", "__end__"]:
-    """
-    ── 条件边路由函数 ───────────────────────────────────────────────────
-
-    从 decide 节点出发后，走哪条路？
-
-    规则：
-      - verdict == "pass" 且没有更多任务（current_task_id is None）→ 结束面试
-      - 其余所有情况 → 继续出题
-
-    注意：这个函数只做路由决策，不改 state，副作用为零。
-    返回值是字符串 key，框架用 add_conditional_edges 里的 map 来查目标节点。
-    """
     verdict = state.get("last_verdict", "pass")
     current_task_id = state.get("current_task_id")
 
