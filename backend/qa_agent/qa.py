@@ -125,16 +125,19 @@ def _retrieve(query: str) -> tuple[list[dict], list[dict], dict, str]:
             lines.append(f"  {cid}  dist={dist:.4f}")
         logger.debug("\n".join(lines))
 
-    entities  = graph_result.get("entities", [])
-    relations = graph_result.get("relations", [])
+    entities       = graph_result.get("entities", [])
+    relations      = graph_result.get("relations", [])
+    bfs_chunk_ids  = graph_result.get("bfs_chunk_ids", [])
     if entities or relations:
-        lines = [f"[graph rag] 召回 {len(entities)} 实体 / {len(relations)} 关系"]
+        lines = [f"[graph rag] 直接命中 {len(entities)} 实体 / {len(relations)} 关系"]
         for e in entities:
             cids = ", ".join(e.get("source_chunk_ids", []))
             lines.append(f"  entity    {e['name']}  chunks=[{cids}]")
         for r in relations:
             cid = r.get("source_chunk_id", "")
             lines.append(f"  relation  {r['subject']} --{r['predicate']}--> {r['object']}  chunk={cid}")
+        if bfs_chunk_ids:
+            lines.append(f"  bfs 扩展 {len(bfs_chunk_ids)} 个 chunk")
         logger.debug("\n".join(lines))
 
     if rrf_stage:
@@ -181,16 +184,18 @@ def _build_system(knowledge: list[dict], notes: list[dict], graph_summary: str) 
 async def prepare_context(question: str, history: list[dict],
                           provider: LLMProvider | None) -> QAContext:
     """改写 query → 检索 → 构建 system prompt，返回 QAContext。"""
+    logger.info("[qa] question: %s", question)
+
     retrieval_query = question
     if provider is not None and history:
         retrieval_query = await _rewrite_query(question, history, provider)
 
     if retrieval_query != question:
-        logger.info("[rewrite] '%s' → '%s'", question, retrieval_query)
+        logger.info("[qa] rewrite: %s", retrieval_query)
 
     knowledge, notes, graph_viz, graph_summary = _retrieve(retrieval_query)
     logger.info(
-        "[qa] retrieved knowledge=%d notes=%d graph_viz_nodes=%d",
+        "[qa] done  knowledge=%d notes=%d graph_viz_nodes=%d",
         len(knowledge), len(notes), len(graph_viz.get("nodes", [])),
     )
 

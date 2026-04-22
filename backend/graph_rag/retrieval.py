@@ -218,6 +218,7 @@ def retrieve_graph(query: str) -> dict:
             "entities":         entities,
             "relations":        relations,
             "source_chunk_ids": all_chunk_ids,
+            "bfs_chunk_ids":    [c for c in bfs_chunk_ids if c in set(all_chunk_ids)],
             "graph_summary":    graph_summary,
             "graph_log":        graph_log,
         }
