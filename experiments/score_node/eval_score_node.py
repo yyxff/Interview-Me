@@ -93,13 +93,18 @@ def spearman(y_true: list[int], y_pred: list[int]) -> float:
 
 
 def compute_metrics(y_true: list[int], y_pred: list[int]) -> dict:
+    n = len(y_true)
+    if n == 0:
+        print("  [warn] no successful predictions — check LLM auth and model config")
+        return {"n": 0, "kappa": None, "mae": None, "spearman": None,
+                "exact_match_rate": None, "soft_match_rate": None}
     return {
-        "n": len(y_true),
+        "n": n,
         "kappa": round(weighted_kappa(y_true, y_pred), 4),
         "mae": round(mae(y_true, y_pred), 4),
         "spearman": round(spearman(y_true, y_pred), 4),
-        "exact_match_rate": round(sum(t == p for t, p in zip(y_true, y_pred)) / len(y_true), 4),
-        "soft_match_rate": round(sum(abs(t - p) <= 1 for t, p in zip(y_true, y_pred)) / len(y_true), 4),
+        "exact_match_rate": round(sum(t == p for t, p in zip(y_true, y_pred)) / n, 4),
+        "soft_match_rate": round(sum(abs(t - p) <= 1 for t, p in zip(y_true, y_pred)) / n, 4),
     }
 
 
@@ -117,16 +122,20 @@ def load_testset(path: str) -> list[dict]:
 
 # ── Eval runs ─────────────────────────────────────────────────────────────────
 
-async def run_accuracy(records: list[dict], no_critic: bool = False) -> tuple[list[int], list[int]]:
+async def run_accuracy(records: list[dict], no_critic: bool = False, no_rag: bool = False) -> tuple[list[int], list[int]]:
     y_true, y_pred = [], []
-    label = "no-critic" if no_critic else "with-critic"
+    parts = []
+    if no_critic: parts.append("no-critic")
+    if no_rag:    parts.append("no-rag")
+    label = "+".join(parts) or "default"
     for i, rec in enumerate(records):
         print(f"  [{i+1}/{len(records)}] {label}  q='{rec['question'][:40]}'")
         try:
-            result = await score_fn(rec["question"], rec["answer"], no_critic=no_critic)
+            result = await score_fn(rec["question"], rec["answer"], no_critic=no_critic, no_rag=no_rag)
             y_true.append(int(rec["gold_score"]))
             y_pred.append(result.score)
-            print(f"    gold={rec['gold_score']}  pred={result.score}  {'✓' if abs(rec['gold_score']-result.score)<=1 else '✗'}")
+            rag_info = f"  rag_calls={result.rag_calls}" if not no_rag else ""
+            print(f"    gold={rec['gold_score']}  pred={result.score}  {'✓' if abs(rec['gold_score']-result.score)<=1 else '✗'}{rag_info}")
         except Exception as e:
             print(f"    [error] {e}")
     return y_true, y_pred
@@ -190,6 +199,27 @@ async def main_async(args):
         output["consistency"] = cons
         print_metrics(cons, "Consistency")
 
+    elif args.compare_rag:
+        print("\nRunning WITH RAG (knowledge base enabled)...")
+        yt, yp = await run_accuracy(records, no_critic=args.no_critic)
+        m_on = compute_metrics(yt, yp)
+        print_metrics(m_on, "RAG ON")
+
+        print("\nRunning WITHOUT RAG (no knowledge base)...")
+        yt2, yp2 = await run_accuracy(records, no_critic=args.no_critic, no_rag=True)
+        m_off = compute_metrics(yt2, yp2)
+        print_metrics(m_off, "RAG OFF")
+
+        delta = {k: round(m_on[k] - m_off.get(k, 0), 4)
+                 for k in m_on if isinstance(m_on[k], float)}
+        output["rag_on"] = m_on
+        output["rag_off"] = m_off
+        output["rag_delta"] = delta
+        print("\n── RAG contribution (ON - OFF) ──")
+        for k, v in delta.items():
+            sign = "+" if v > 0 else ""
+            print(f"  {k}: {sign}{v}")
+
     elif args.compare_critic:
         print("\nRunning WITH critic...")
         yt, yp = await run_accuracy(records, no_critic=False)
@@ -212,12 +242,16 @@ async def main_async(args):
 
     else:
         no_critic = args.no_critic
-        print(f"\nRunning accuracy eval ({'no-critic' if no_critic else 'with-critic'})...")
-        yt, yp = await run_accuracy(records, no_critic=no_critic)
+        no_rag = args.no_rag
+        parts = []
+        if no_critic: parts.append("no-critic")
+        if no_rag:    parts.append("no-rag")
+        label_str = "+".join(parts) or "default"
+        print(f"\nRunning accuracy eval ({label_str})...")
+        yt, yp = await run_accuracy(records, no_critic=no_critic, no_rag=no_rag)
         m = compute_metrics(yt, yp)
-        label = "no_critic" if no_critic else "with_critic"
-        output[label] = m
-        print_metrics(m, f"Accuracy ({'no-critic' if no_critic else 'with-critic'})")
+        output[label_str] = m
+        print_metrics(m, f"Accuracy ({label_str})")
 
     path = save_results(output, results_dir)
     print(f"\nResults saved to {path}")
@@ -227,8 +261,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--testset", default="testsets/score_node.jsonl")
     parser.add_argument("--no-critic", action="store_true", help="Skip Critic-Actor loop")
+    parser.add_argument("--no-rag", action="store_true", help="Disable knowledge base access")
     parser.add_argument("--consistency", action="store_true", help="Run 3x per case, measure variance")
     parser.add_argument("--compare-critic", action="store_true", help="Run both critic on/off and compare")
+    parser.add_argument("--compare-rag", action="store_true", help="Run both rag on/off and compare")
     args = parser.parse_args()
     asyncio.run(main_async(args))
 

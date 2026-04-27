@@ -24,6 +24,12 @@ python3 eval_score_node.py --testset testsets/score_node.jsonl --compare-critic
 
 # 5. Measure score consistency
 python3 eval_score_node.py --testset testsets/score_node.jsonl --consistency
+
+# RAG on/off
+python3 eval_score_node.py --testset testsets/score_node.jsonl --compare-rag
+
+# turn off critic，only see RAG contribution
+python3 eval_score_node.py --testset testsets/score_node.jsonl --compare-rag --no-critic
 ```
 
 ## Metrics
