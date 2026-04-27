@@ -26,3 +26,7 @@ experiments/rag/testsets/
 # 用户 profile（简历等，本地数据）
 backend/profile/
 resume.md
+
+experiments/agent_eval/results/
+experiments/score_node/results/
+experiments/score_node/testsets/

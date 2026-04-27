@@ -155,6 +155,8 @@ async def score_node(state: InterviewState) -> dict:
         result["messages"][-1].content,
         default={"score": 3, "reasoning": "解析失败", "feedback": ""},
     )
+    if not isinstance(current, dict):
+        current = {"score": 3, "reasoning": "解析失败（输出非对象）", "feedback": ""}
     logger.info(
         "[score] ① done  (%.1fs)  score=%s\n  reasoning= %s\n  feedback = %s",
         time.time()-t0, current.get('score'),

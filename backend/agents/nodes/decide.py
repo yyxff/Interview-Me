@@ -149,6 +149,8 @@ async def decide_node(state: InterviewState) -> dict:
 
     d = _parse_json(result["messages"][-1].content,
                     default={"decision": "pass", "reasoning": "解析失败", "sub_questions": []})
+    if not isinstance(d, dict):
+        d = {"decision": "pass", "reasoning": "解析失败（输出非对象）", "sub_questions": []}
     decision = d.get("decision", "pass")
     if decision not in ("deepen", "pivot", "back_up", "pass"):
         decision = "pass"

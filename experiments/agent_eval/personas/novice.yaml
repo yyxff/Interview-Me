@@ -1,0 +1,20 @@
+# Novice persona — surface knowledge across all domains
+# Expected: avg_score <= 3.0, deepen_rate >= 40%
+
+name: novice
+description: 1年经验，了解基本概念但缺少深度，项目经验有限
+
+skills:
+  redis: 2
+  mysql: 2
+  os: 1
+  network: 2
+  distributed: 1
+  general_backend: 2
+
+style: |
+  回答方向大致正确，但停留在表面概念。
+  经常遗漏关键细节或原理解释。
+  语气不太确定，偶尔说"我觉得应该是..."。
+  回答较短（1-3句），不展开。
+  偶尔混淆相近概念。

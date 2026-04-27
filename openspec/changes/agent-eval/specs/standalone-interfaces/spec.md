@@ -1,10 +1,10 @@
 ## ADDED Requirements
 
 ### Requirement: Score node headless 调用接口
-系统 SHALL 提供 `backend/agents/runner.py`，暴露 `score()` 函数，接受 question、answer、可选 no_critic 参数，直接调用 `score_node` 逻辑并返回结构化结果，不依赖 FastAPI 或任何 HTTP 层。
+系统 SHALL 提供 `experiments/shared/runner.py`，暴露 `score()` 函数，接受 question、answer、可选 no_critic 参数，通过 sys.path 直接 import backend 的 `score_node` 逻辑并返回结构化结果，不依赖 FastAPI 或任何 HTTP 层。该文件不属于后端生产代码。
 
 #### Scenario: 直接调用 score
-- **WHEN** 从任意 Python 脚本执行 `from agents.runner import score; result = await score(question, answer)`
+- **WHEN** 从 eval 脚本执行 `from runner import score; result = await score(question, answer)`
 - **THEN** 返回包含 `score`(int)、`reasoning`(str)、`feedback`(str) 的对象，与 score_node 内部逻辑完全一致
 
 #### Scenario: 跳过 Critic
@@ -16,7 +16,7 @@
 - **THEN** 正常执行，不抛出任何与路由或 HTTP 相关的异常
 
 ### Requirement: 完整 interview headless 运行接口
-系统 SHALL 提供 `backend/agents/session_runner.py`，暴露 `run_session()` 函数，接受 jd（职位描述）、direction（方向）和 `answer_fn` 回调，驱动完整 plan → ask → score → decide 循环，不依赖 HTTP 请求或前端。
+系统 SHALL 提供 `experiments/shared/session_runner.py`，暴露 `run_session()` 函数，接受 jd（职位描述）、direction（方向）和 `answer_fn` 回调，通过 sys.path 直接 import backend 的 `interview_graph`，驱动完整 plan → ask → score → decide 循环，不依赖 HTTP 请求或前端。该文件不属于后端生产代码。
 
 #### Scenario: Persona 驱动完整 session
 - **WHEN** 调用 `await run_session(jd="...", direction="...", answer_fn=persona_answer_fn)`
@@ -34,9 +34,9 @@
 - **WHEN** 在未启动 FastAPI server 的环境中调用 `run_session()`
 - **THEN** 正常执行，不依赖任何 HTTP 层
 
-### Requirement: 评估脚本可直接 import backend 模块
-评估脚本（`experiments/score_node/` 和 `experiments/agent_eval/` 下）SHALL 通过 `sys.path` 添加 `backend/` 目录后直接 import `agents.runner` 和 `agents.session_runner`，不需要安装额外 Python 包。
+### Requirement: 评估脚本通过 shared 模块 import
+评估脚本（`experiments/score_node/` 和 `experiments/agent_eval/` 下）SHALL 通过 `sys.path` 添加 `experiments/shared/` 后 import `runner` 和 `session_runner`，不需要安装额外 Python 包，不直接修改后端代码。
 
 #### Scenario: 评估脚本路径配置
 - **WHEN** 在 `experiments/score_node/` 或 `experiments/agent_eval/` 下运行任意评估脚本
-- **THEN** 脚本头部的 `sys.path` 配置使 `from agents.runner import score` 成功 import
+- **THEN** 脚本头部的 `sys.path` 配置使 `from runner import score` 成功 import

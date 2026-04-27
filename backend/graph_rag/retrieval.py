@@ -343,7 +343,7 @@ def explore_concept_bfs(entity: str, hops: int = 1) -> dict:
         if matched is None:
             ent_col = _get_entities_col()
             if ent_col.count() > 0:
-                raw = rag._safe_query(ent_col, entity, top_k=3, return_distances=True)
+                raw = rag._safe_query(ent_col, entity, 3, return_distances=True)
                 for _, meta, dist in raw:
                     name = meta.get("name", "")
                     if name and G.has_node(name) and dist < 0.6:

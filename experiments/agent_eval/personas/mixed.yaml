@@ -1,0 +1,21 @@
+# Mixed persona — expert in some domains, weak in others
+# Expected: score gap >= 1.5 between strong/weak domains
+
+name: mixed
+description: 3年经验，Redis/MySQL熟练，操作系统和网络较弱
+
+skills:
+  redis: 5      # strong
+  mysql: 4      # strong
+  os: 2         # weak
+  network: 2    # weak
+  distributed: 3
+  general_backend: 3
+
+strong_domains: [redis, mysql]
+weak_domains: [os, network]
+
+style: |
+  在强项领域（Redis/MySQL）：回答准确完整，有深度，能举例。
+  在弱项领域（OS/网络）：只知道基本概念，细节不清楚，容易答非所问。
+  在中间领域：回答方向对但有遗漏。
