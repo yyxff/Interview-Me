@@ -1607,24 +1607,19 @@ export default function KnowledgeQAPage() {
                       ? <CitedContent content={ans.content} sources={ans.sources} onOpen={setViewer} />
                       : (ans.content || (isStreaming ? <span className="stream-cursor" /> : null))}
                   </div>
-                  {ans.sources && ans.sources.length > 0 && (() => {
-                    const listSources = ans.sources.filter(s => !s.via_graph);
-                    return (
-                      <>
-                        {listSources.length > 0 && (
-                          <div className="qa-sources">
-                            <span className="qa-sources-label">参考资料</span>
-                            {listSources.map((s, i) => (
-                              <SourceChip key={s.chunk_id} index={i} source={s} onOpen={setViewer} />
-                            ))}
-                          </div>
-                        )}
-                        {ans.graph && ans.graph.nodes.length > 0 && (
-                          <GraphPanel data={ans.graph} sources={ans.sources!} onOpen={setViewer} />
-                        )}
-                      </>
-                    );
-                  })()}
+                  {ans.sources && ans.sources.length > 0 && (
+                    <>
+                      <div className="qa-sources">
+                        <span className="qa-sources-label">参考资料</span>
+                        {ans.sources.map((s, i) => (
+                          <SourceChip key={s.chunk_id} index={i} source={s} onOpen={setViewer} />
+                        ))}
+                      </div>
+                      {ans.graph && ans.graph.nodes.length > 0 && (
+                        <GraphPanel data={ans.graph} sources={ans.sources!} onOpen={setViewer} />
+                      )}
+                    </>
+                  )}
                 </div>
               </Fragment>
             );

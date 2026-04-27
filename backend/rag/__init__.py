@@ -18,9 +18,10 @@ from .indexing import (
 from .retrieval import (
     SIMILARITY_DISTANCE_THRESHOLD,
     _safe_query, _rrf_merge, _dedupe_chunks,
-    retrieve, retrieve_rich, retrieve_graph,
+    retrieve, retrieve_graph,
     has_resume, knowledge_count,
 )
+from .retrieval_rich import retrieve_rich
 from .notes import (
     save_note_file, index_note,
     list_notes, get_note, get_note_questions, delete_note, notes_count,

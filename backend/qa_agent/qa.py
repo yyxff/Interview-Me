@@ -199,7 +199,6 @@ async def prepare_context(question: str, history: list[dict],
         len(knowledge), len(notes), len(graph_viz.get("nodes", [])),
     )
 
-    all_sources = knowledge + notes
     sources = [
         {
             "source":    c["source"],
@@ -209,7 +208,7 @@ async def prepare_context(question: str, history: list[dict],
             "text":      c["text"],
             "via_graph": c.get("via_graph", False),
         }
-        for c in all_sources
+        for c in knowledge
     ]
 
     messages = history[-_MAX_HISTORY:]
