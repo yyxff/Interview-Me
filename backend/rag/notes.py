@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import datetime as _dt
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .client import is_available, NOTES_DIR, _get_notes_col
+from .client import is_available, NOTES_DIR, _get_notes_col, _get_knowledge_col
+
+if TYPE_CHECKING:
+    from llm.provider import LLMProvider
 
 
 def save_note_file(title: str, content: str, questions: list[str] | None = None) -> tuple[str, str]:
@@ -48,12 +52,15 @@ def _write_meta(note_id: str, meta: dict) -> None:
     )
 
 
-def index_note(note_id: str, title: str, text: str) -> None:
-    """在 ChromaDB 中索引一条笔记（同步，供后台线程调用）。"""
+def _index_note_sync(note_id: str, title: str, text: str) -> None:
+    """同步写入 notes collection 和 knowledge collection。"""
     if not is_available():
         return
+
+    # notes collection
     try:
-        col = _get_notes_col()
+        col  = _get_notes_col()
+        meta = _read_meta(note_id)
         try:
             existing = col.get(where={"note_id": note_id})
             if existing["ids"]:
@@ -61,9 +68,7 @@ def index_note(note_id: str, title: str, text: str) -> None:
         except Exception:
             pass
 
-        meta      = _read_meta(note_id)
         questions = meta.get("questions", [])
-
         if questions:
             col.add(
                 ids=[f"{note_id}_q{i}" for i in range(len(questions))],
@@ -81,7 +86,61 @@ def index_note(note_id: str, title: str, text: str) -> None:
         meta["indexed"] = True
         _write_meta(note_id, meta)
     except Exception as e:
-        print(f"[rag] 笔记索引失败: {e}")
+        print(f"[rag] 笔记索引失败(notes): {e}")
+
+    # knowledge collection — 整篇笔记作为单 chunk
+    chunk_id = f"note:{note_id}"
+    try:
+        kcol = _get_knowledge_col()
+        try:
+            existing = kcol.get(ids=[chunk_id])
+            if existing["ids"]:
+                kcol.delete(ids=[chunk_id])
+        except Exception:
+            pass
+        kcol.add(
+            ids=[chunk_id],
+            documents=[text],
+            metadatas=[{
+                "chunk_id": chunk_id,
+                "text":     text,
+                "source":   "笔记",
+                "path":     "",
+                "chapter":  title,
+                "question": "",
+            }],
+        )
+        print(f"[rag] 笔记已写入 knowledge collection: {chunk_id}")
+    except Exception as e:
+        print(f"[rag] 笔记写入 knowledge 失败: {e}")
+
+
+async def index_note(note_id: str, title: str, text: str,
+                     provider: "LLMProvider | None" = None) -> None:
+    """索引笔记（async）：sync DB 操作在线程池执行，graph RAG 抽取在 event loop 执行。"""
+    import asyncio
+    await asyncio.to_thread(_index_note_sync, note_id, title, text)
+
+    if provider is None:
+        return
+
+    chunk_id = f"note:{note_id}"
+    try:
+        import graph_rag as _gr
+        from graph_rag.extractor import _extract_entities_relations
+
+        entities, relations = await _extract_entities_relations(text, provider)
+        if not entities:
+            print(f"[graph_rag] 笔记无可抽取实体，跳过图谱索引: {note_id}")
+            return
+
+        source = f"note:{note_id}"
+        graph  = _gr._build_graph_for_source(source, [(entities, relations, chunk_id)])
+        _gr._save_graph(source, graph)
+        _gr._index_graph_to_qdrant(graph)
+        print(f"[graph_rag] 笔记图谱已索引: {source} ({len(entities)} 实体, {len(relations)} 关系)")
+    except Exception as e:
+        print(f"[graph_rag] 笔记图谱索引失败: {e}")
 
 
 def list_notes() -> list[dict]:
@@ -119,14 +178,47 @@ def delete_note(note_id: str) -> bool:
         p = NOTES_DIR / f"{note_id}{suffix}"
         if p.exists():
             p.unlink()
-    if is_available():
-        try:
-            col = _get_notes_col()
-            existing = col.get(where={"note_id": note_id})
-            if existing["ids"]:
-                col.delete(ids=existing["ids"])
-        except Exception:
-            pass
+
+    if not is_available():
+        return True
+
+    # notes collection
+    try:
+        col      = _get_notes_col()
+        existing = col.get(where={"note_id": note_id})
+        if existing["ids"]:
+            col.delete(ids=existing["ids"])
+    except Exception:
+        pass
+
+    # knowledge collection
+    try:
+        kcol     = _get_knowledge_col()
+        chunk_id = f"note:{note_id}"
+        existing = kcol.get(ids=[chunk_id])
+        if existing["ids"]:
+            kcol.delete(ids=[chunk_id])
+    except Exception:
+        pass
+
+    # graph RAG — Qdrant entity/relation collections
+    try:
+        import graph_rag as _gr
+        source = f"note:{note_id}"
+        _gr._clear_vectors_for_source(_gr._get_entities_col(), source)
+        _gr._clear_vectors_for_source(_gr._get_relations_col(), source)
+    except Exception:
+        pass
+
+    # graph RAG — graph.json file
+    try:
+        import graph_rag as _gr
+        graph_file = _gr.GRAPH_DIR / f"note:{note_id}.graph.json"
+        if graph_file.exists():
+            graph_file.unlink()
+    except Exception:
+        pass
+
     return True
 
 

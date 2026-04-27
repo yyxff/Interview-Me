@@ -102,7 +102,7 @@ async def notes_index(note_id: str):
     notes = rag.list_notes()
     note  = next((n for n in notes if n["note_id"] == note_id), None)
     title = note["title"] if note else note_id
-    asyncio.create_task(asyncio.to_thread(rag.index_note, note_id, title, content))
+    asyncio.create_task(rag.index_note(note_id, title, content, _provider))
     return {"ok": True}
 
 
